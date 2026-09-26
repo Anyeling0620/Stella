@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Stella IM</title>
+    <script>
+      // Apply the stored theme before first paint so a reload never flashes the
+      // default palette. An unknown value simply matches no rule and falls back
+      // to the tokens in `:root`.
+      try {
+        var storedTheme = localStorage.getItem('stella.im.theme');
+        if (storedTheme) document.documentElement.setAttribute('data-theme', storedTheme);
+      } catch (error) {
+        /* storage blocked — keep the default theme */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

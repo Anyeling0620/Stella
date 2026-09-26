@@ -1,0 +1,11 @@
+# pnpm workspace — `server` and `web` are installed from a single root install
+# with one shared lockfile and one content-addressable store.
+packages:
+  - server
+  - web
+
+# pnpm 10 blocks dependency build scripts by default. esbuild (used by Vite)
+# needs its install script to wire up the platform binary, so it must be allowed
+# explicitly; everything else in this project is pure JS and needs no build step.
+onlyBuiltDependencies:
+  - esbuild

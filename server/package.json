@@ -1,0 +1,27 @@
+{
+  "name": "stella-im-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stella Web IM backend: Express + WebSocket + MySQL",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "db:init": "node src/db/init.js",
+    "test:e2e": "node test/e2e.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.11.3",
+    "stella-web-im": "file:..",
+    "ws": "^8.18.0"
+  }
+}

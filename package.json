@@ -1,0 +1,29 @@
+{
+  "name": "stella-web-im",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stella Web IM — SharedWorker 全局唯一长连接即时通讯系统（React18 + TS + Express + WebSocket + MySQL）",
+  "packageManager": "pnpm@10.6.1+sha512.40ee09af407fa9fbb5fbfb8e1cb40fbb74c0af0c3e10e9224d7b53c7658528615b2c92450e74cfad91e3a2dcafe3ce4050d80bda71d757756d2ce2b66213e9a3",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "install:all": "pnpm install",
+    "db:init": "pnpm -C server db:init",
+    "dev": "pnpm -r --parallel dev",
+    "dev:server": "pnpm -C server dev",
+    "dev:web": "pnpm -C web dev",
+    "start:server": "pnpm -C server start",
+    "build:web": "pnpm -C web build",
+    "preview:web": "pnpm -C web preview",
+    "demo": "pnpm -C web demo",
+    "visual": "pnpm -C web visual",
+    "perf": "pnpm -C web perf",
+    "typecheck": "pnpm -C web typecheck",
+    "test:server": "pnpm -C server test:e2e",
+    "test:engine": "pnpm -C web test:engine",
+    "test:governance": "pnpm -C web test:governance",
+    "test:browser": "pnpm -C web test:browser",
+    "test": "pnpm test:server && pnpm test:engine"
+  }
+}

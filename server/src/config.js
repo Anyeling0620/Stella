@@ -1,0 +1,69 @@
+'use strict';
+
+/**
+ * Centralised configuration. Every value is driven by an environment variable
+ * with a safe default so the prototype boots with zero setup.
+ */
+require('dotenv').config();
+
+const toInt = (value, fallback) => {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const toList = (value, fallback) =>
+  (value || fallback)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+const config = {
+  env: process.env.NODE_ENV || 'development',
+
+  http: {
+    port: toInt(process.env.PORT, 3001),
+    host: process.env.HOST || '0.0.0.0',
+  },
+
+  cors: {
+    // Dev server (5173) and preview server (4173), on both host spellings.
+    origins: toList(
+      process.env.CORS_ORIGINS,
+      'http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173'
+    ),
+  },
+
+  db: {
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: toInt(process.env.DB_PORT, 3308),
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '123456',
+    database: process.env.DB_NAME || 'stella_im',
+    connectionLimit: toInt(process.env.DB_POOL, 10),
+  },
+
+  jwt: {
+    accessSecret: process.env.JWT_ACCESS_SECRET || 'stella-im-access-secret-dev',
+    refreshSecret: process.env.JWT_REFRESH_SECRET || 'stella-im-refresh-secret-dev',
+    accessTtlSec: toInt(process.env.ACCESS_TTL_SEC, 15 * 60),
+    refreshTtlSec: toInt(process.env.REFRESH_TTL_SEC, 7 * 24 * 3600),
+    issuer: 'stella-im',
+    audience: 'stella-im-client',
+  },
+
+  ws: {
+    path: '/ws',
+    // server -> client ping cadence
+    heartbeatIntervalMs: toInt(process.env.WS_HEARTBEAT_MS, 25_000),
+    // periodic token re-validation for every live socket
+    authCheckIntervalMs: toInt(process.env.WS_AUTH_CHECK_MS, 60_000),
+    maxPayloadBytes: 1024 * 256,
+  },
+
+  systemNotice: {
+    enabled: process.env.SYSTEM_NOTICE_ENABLED !== 'false',
+    intervalMs: toInt(process.env.SYSTEM_NOTICE_MS, 2 * 60 * 1000),
+  },
+};
+
+module.exports = config;
