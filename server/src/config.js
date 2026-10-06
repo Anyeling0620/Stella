@@ -6,6 +6,8 @@
  */
 require('dotenv').config();
 
+const path = require('path');
+
 const toInt = (value, fallback) => {
   const n = Number.parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -63,6 +65,15 @@ const config = {
   systemNotice: {
     enabled: process.env.SYSTEM_NOTICE_ENABLED !== 'false',
     intervalMs: toInt(process.env.SYSTEM_NOTICE_MS, 2 * 60 * 1000),
+  },
+
+  // Chat attachments (images / files). Stored on local disk under `uploads/`;
+  // the database only keeps metadata (see attachmentRepo). Images are capped
+  // separately from generic files.
+  uploads: {
+    dir: process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads'),
+    imageMaxBytes: toInt(process.env.UPLOAD_IMAGE_MAX_BYTES, 10 * 1024 * 1024),
+    fileMaxBytes: toInt(process.env.UPLOAD_FILE_MAX_BYTES, 50 * 1024 * 1024),
   },
 };
 

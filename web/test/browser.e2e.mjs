@@ -196,6 +196,11 @@ async function run() {
       'transport is not reported as shared-worker'
     );
     assert.equal(await testIdAttr(page1, 'status-role', 'data-role'), 'leader', 'this tab should be the active window');
+
+    // Real-time network status (bottom-left): online + connected while linked.
+    assert.equal(await testIdAttr(page1, 'status-pill', 'data-network'), 'online', 'network should read online');
+    const statusText = await page1.$eval('[data-testid="status-text"]', (el) => el.textContent || '');
+    assert.ok(statusText.includes('已连接'), `status text should read 已连接, got "${statusText}"`);
   });
 
   await check('页面重复加载不会泄漏额外连接（StrictMode 双挂载 + 快速重载）', async () => {
@@ -300,6 +305,15 @@ async function run() {
       [...document.querySelectorAll('[data-testid="toast"]')].some((node) => node.textContent.includes('新消息'))
     );
     assert.ok(toastVisible, 'recipient did not receive a "新消息" toast');
+
+    // B has the conversation closed -> its list item must badge the unread.
+    const unreadBadge = await pageB.evaluate((name) => {
+      const item = [...document.querySelectorAll('[data-testid="conversation-item"]')].find((node) =>
+        (node.textContent || '').includes(name)
+      );
+      return item?.querySelector('.badge-unread')?.textContent ?? null;
+    }, userA.nickname);
+    assert.ok(unreadBadge, 'recipient conversation item should show an unread badge');
   });
 
   await check('会话内消息静默更新，不产生重复弹窗', async () => {
@@ -328,6 +342,34 @@ async function run() {
       content
     );
     assert.equal(toasted, false, 'in-conversation message raised a duplicate toast');
+
+    // The conversation row now shows the last-message time (WeChat-style).
+    const shownTime = await page1.evaluate((name) => {
+      const item = [...document.querySelectorAll('[data-testid="conversation-item"]')].find((node) =>
+        (node.textContent || '').includes(name)
+      );
+      return item?.querySelector('.conversation-time')?.textContent ?? null;
+    }, userB.nickname);
+    assert.ok(shownTime, `conversation item should show a timestamp, got "${shownTime}"`);
+
+    // Composer height is adjustable by dragging its top edge (ref-based).
+    const composerHeight = () =>
+      page1.evaluate(
+        () => document.querySelector('[data-testid="composer-input"]').closest('form').getBoundingClientRect().height
+      );
+    const beforeComposer = await composerHeight();
+    const handle = await page1.$eval('[data-testid="composer-resizer"]', (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    });
+    await page1.mouse.move(handle.x, handle.y);
+    await page1.mouse.down();
+    await page1.mouse.move(handle.x, handle.y - 80, { steps: 8 });
+    await page1.mouse.up();
+    const afterComposer = await composerHeight();
+    assert.ok(afterComposer > beforeComposer + 40, `composer not resizable (${beforeComposer} -> ${afterComposer})`);
+    const storedComposer = await page1.evaluate(() => window.localStorage.getItem('stella.im.composer-h'));
+    assert.ok(storedComposer && /^\d+px$/.test(storedComposer), `composer height not persisted: ${storedComposer}`);
   });
 
   console.log('\nProfile editing');
@@ -519,6 +561,67 @@ async function run() {
     const before = await connectionCount();
     await sleep(1500);
     assert.equal(await connectionCount(), before, 'a connection was re-established after logout');
+  });
+
+  console.log('\nTransport host switch');
+  await check('传输模式可切换为「页内单例抢占」并立即生效', async () => {
+    // Isolated context so this cannot disturb the singleton/connection assertions
+    // above (switching hosts briefly rebuilds the client).
+    const ctx = await browser.createBrowserContext();
+    const page = await ctx.newPage();
+    page.on('pageerror', (error) => console.error('[host page error]', error.message));
+    const hostTag = uniq();
+    await registerThroughUi(page, `ui_host_${hostTag}`.slice(0, 32), `UIHost${hostTag.slice(-4)}`);
+
+    // Default resolves to SharedWorker on a capable browser.
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="status-pill"]')?.getAttribute('data-transport') === 'shared-worker',
+      { timeout: 12000 }
+    );
+
+    await clickTestId(page, 'profile-open');
+    await page.waitForSelector('[data-testid="profile-dialog"]', { timeout: 8000 });
+    await clickTestId(page, 'host-in-tab');
+
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="status-pill"]')?.getAttribute('data-transport') === 'in-tab-fallback',
+      { timeout: 12000 }
+    );
+    const stored = await page.evaluate(() => window.localStorage.getItem('stella.im.transport-host'));
+    assert.equal(stored, 'in-tab', 'host preference was not persisted');
+
+    await ctx.close();
+  });
+
+  await check('侧栏分割线可拖动且宽度被保存', async () => {
+    const ctx = await browser.createBrowserContext();
+    const page = await ctx.newPage();
+    page.on('pageerror', (error) => console.error('[splitter page error]', error.message));
+    const splitTag = uniq();
+    await registerThroughUi(page, `ui_split_${splitTag}`.slice(0, 32), `UISplit${splitTag.slice(-4)}`);
+
+    const sidebarWidth = () =>
+      page.evaluate(() => document.querySelector('[data-testid="shell"]').firstElementChild.getBoundingClientRect().width);
+
+    const before = await sidebarWidth();
+    const box = await page.$eval('[data-testid="splitter"]', (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    });
+
+    await page.mouse.move(box.x, box.y);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 90, box.y, { steps: 10 });
+    await page.mouse.up();
+
+    const after = await sidebarWidth();
+    assert.ok(after > before + 40, `sidebar did not resize (${before} -> ${after})`);
+    const stored = await page.evaluate(() => window.localStorage.getItem('stella.im.sidebar-w'));
+    assert.ok(stored && /^\d+px$/.test(stored), `width not persisted: ${stored}`);
+
+    await ctx.close();
   });
 
   await browser.close();

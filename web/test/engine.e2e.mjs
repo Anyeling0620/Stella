@@ -324,6 +324,45 @@ async function run() {
     await proxy.close().catch(() => {});
   });
 
+  console.log('\nTransport strategy switch');
+  await check('策略=仅轮询：不创建任何 WebSocket，直接使用 HTTP 轮询', async () => {
+    const pair = await makePair();
+    let wsCreated = 0;
+    // A WebSocket constructor that must never run in forced-poll mode.
+    class SpySocket {
+      constructor() {
+        wsCreated += 1;
+        throw new Error('WebSocket must not be created in forced-poll mode');
+      }
+    }
+    const { engine } = startEngine({
+      token: pair.alice.accessToken,
+      options: { transportMode: 'poll', WebSocket: SpySocket },
+    });
+    engine.start();
+    await waitFor(() => engine.snapshot().state === 'polling', 4000, 'polling state');
+    assert.equal(engine.snapshot().state, 'polling');
+    assert.equal(wsCreated, 0, 'a WebSocket was created despite forced polling');
+    engine.stop();
+  });
+
+  await check('运行时切换 poll → auto：停止轮询并建立 WebSocket', async () => {
+    const pair = await makePair();
+    const { engine } = startEngine({ token: pair.alice.accessToken, options: { transportMode: 'poll' } });
+    engine.start();
+    await waitFor(() => engine.snapshot().state === 'polling', 4000, 'polling state');
+
+    engine.setTransportMode('auto');
+    await waitFor(() => engine.snapshot().state === 'open', 6000, 'websocket open after switching to auto');
+    assert.equal(engine.snapshot().connected, true, 'socket not connected after switching to auto');
+
+    // Switch back to forced polling: the socket must close and polling resume.
+    engine.setTransportMode('poll');
+    await waitFor(() => engine.snapshot().state === 'polling', 4000, 'polling state after switch back');
+    assert.equal(engine.snapshot().connected, false, 'socket still open in poll mode');
+    engine.stop();
+  });
+
   console.log('\nSession revocation');
   await check('服务端登出（令牌版本失效）→ 引擎收到会话失效并彻底停止重连', async () => {
     const { engine, events } = startEngine({

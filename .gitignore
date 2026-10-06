@@ -29,6 +29,9 @@ Thumbs.db
 # test artefacts
 web/test/screenshots/
 
+# uploaded chat attachments (bytes are local only; metadata lives in MySQL)
+server/uploads/
+
 # misc
 coverage/
 *.tsbuildinfo

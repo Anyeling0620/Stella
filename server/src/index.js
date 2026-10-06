@@ -63,6 +63,8 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/friends', require('./routes/friends'));
 app.use('/api/messages', require('./routes/messages'));
+app.use('/api/groups', require('./routes/groups'));
+app.use('/api/attachments', require('./routes/attachments'));
 app.use('/api/system', require('./routes/system'));
 
 app.use(notFoundHandler);

@@ -43,9 +43,37 @@ const removeFriendship = async (userId, friendId) => {
   return Number(result.affectedRows) > 0;
 };
 
+/**
+ * The caller's friends, each annotated with the newest 1:1 message exchanged
+ * with them (for the conversation-list preview). The correlated subqueries are
+ * backed by `idx_message_pair`.
+ */
 const listFriends = (userId) =>
   query(
-    `SELECT u.id, u.username, u.nickname, u.avatar, u.last_seen_at, f.created_at AS friended_at
+    `SELECT u.id, u.username, u.nickname, u.avatar, u.last_seen_at, f.created_at AS friended_at,
+            (SELECT m.content FROM messages m
+              WHERE m.group_id IS NULL
+                AND ((m.from_user_id = f.user_id AND m.to_user_id = f.friend_id)
+                  OR (m.from_user_id = f.friend_id AND m.to_user_id = f.user_id))
+              ORDER BY m.id DESC LIMIT 1) AS last_content,
+            (SELECT m.type FROM messages m
+              WHERE m.group_id IS NULL
+                AND ((m.from_user_id = f.user_id AND m.to_user_id = f.friend_id)
+                  OR (m.from_user_id = f.friend_id AND m.to_user_id = f.user_id))
+              ORDER BY m.id DESC LIMIT 1) AS last_type,
+            (SELECT m.from_user_id FROM messages m
+              WHERE m.group_id IS NULL
+                AND ((m.from_user_id = f.user_id AND m.to_user_id = f.friend_id)
+                  OR (m.from_user_id = f.friend_id AND m.to_user_id = f.user_id))
+              ORDER BY m.id DESC LIMIT 1) AS last_from,
+            (SELECT m.created_at FROM messages m
+              WHERE m.group_id IS NULL
+                AND ((m.from_user_id = f.user_id AND m.to_user_id = f.friend_id)
+                  OR (m.from_user_id = f.friend_id AND m.to_user_id = f.user_id))
+              ORDER BY m.id DESC LIMIT 1) AS last_at,
+            (SELECT COUNT(*) FROM messages m
+              WHERE m.group_id IS NULL AND m.from_user_id = f.friend_id AND m.to_user_id = f.user_id
+                AND m.status < 2) AS unread
        FROM friendships f
        JOIN users u ON u.id = f.friend_id
       WHERE f.user_id = ?
@@ -59,6 +87,15 @@ const listFriends = (userId) =>
       avatar: r.avatar || null,
       lastSeenAt: r.last_seen_at,
       friendedAt: r.friended_at,
+      unread: Number(r.unread) || 0,
+      lastMessage: r.last_at
+        ? {
+            type: r.last_type || 'text',
+            content: r.last_content,
+            fromUserId: Number(r.last_from),
+            createdAt: r.last_at,
+          }
+        : null,
     }))
   );
 

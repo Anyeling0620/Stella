@@ -2,6 +2,7 @@ import { API } from '../config';
 import { TAB_POLICY } from '../config';
 import { bus, BUS } from './bus';
 import { uid } from './storage';
+import type { TransportHost, TransportMode } from './transport';
 import type { ChatMessage, RealtimeMode, RealtimeState, RealtimeStatus, ServerFrame, SystemNotice, TransportKind } from '../types';
 
 /**
@@ -36,6 +37,7 @@ interface RealtimeEngine {
   start(): void;
   stop(graceful?: boolean): void;
   retryNow(): void;
+  setTransportMode?(mode: string): void;
   send(frame: unknown): boolean;
   isOpen(): boolean;
   setCursor(cursor: { messageId?: number; noticeId?: number }): void;
@@ -47,7 +49,7 @@ interface RealtimeEngineFactory {
 }
 
 interface EngineEvent {
-  type: 'state' | 'frame' | 'poll' | 'need-token' | 'session-invalid';
+  type: 'state' | 'frame' | 'poll' | 'need-token' | 'session-invalid' | 'latency';
   state?: RealtimeState;
   mode?: RealtimeMode;
   attempt?: number;
@@ -60,6 +62,7 @@ interface EngineEvent {
   messages?: ChatMessage[];
   notices?: SystemNotice[];
   serverTime?: string;
+  rttMs?: number;
 }
 
 export interface PollPayload {
@@ -75,6 +78,8 @@ export interface RealtimeHandlers {
   onNeedToken: (reason: string) => void;
   onSessionInvalid: (reason: string) => void;
   onLeaderChange: (isLeader: boolean) => void;
+  /** Round-trip time of the periodic ping, in milliseconds. */
+  onLatency: (rttMs: number) => void;
 }
 
 const IDLE_STATUS: RealtimeStatus = {
@@ -109,6 +114,15 @@ type BusMessage =
   | { kind: typeof BUS.LEADER_HEARTBEAT; tabId: string; at: number }
   | { kind: typeof BUS.SESSION_INVALID; reason: string };
 
+/** Resolves the configured host preference to an actually usable transport. */
+function resolveTransport(host: TransportHost): TransportKind {
+  const sharedAvailable = typeof SharedWorker !== 'undefined';
+  if (host === 'in-tab') return 'in-tab-fallback';
+  // 'auto' and 'shared-worker' both prefer SharedWorker; if the browser cannot
+  // provide one, only the in-tab fallback is possible.
+  return sharedAvailable ? 'shared-worker' : 'in-tab-fallback';
+}
+
 export class RealtimeClient {
   readonly transport: TransportKind;
   readonly tabId = uid();
@@ -130,11 +144,12 @@ export class RealtimeClient {
   private isLeader = false;
   private currentToken: string | null = null;
   private lastStatus: RealtimeStatus = IDLE_STATUS;
+  private mode: TransportMode = 'auto';
   private disposed = false;
 
-  constructor(handlers: RealtimeHandlers) {
+  constructor(handlers: RealtimeHandlers, host: TransportHost = 'auto') {
     this.handlers = handlers;
-    this.transport = typeof SharedWorker !== 'undefined' ? 'shared-worker' : 'in-tab-fallback';
+    this.transport = resolveTransport(host);
   }
 
   // -------------------------------------------------------------------------
@@ -211,10 +226,32 @@ export class RealtimeClient {
   connect(token: string): void {
     this.currentToken = token;
     if (this.transport === 'shared-worker') {
-      this.port?.postMessage({ type: 'connect', token, wsUrl: API.ws, pollUrl: API.poll });
+      this.port?.postMessage({
+        type: 'connect',
+        token,
+        wsUrl: API.ws,
+        pollUrl: API.poll,
+        transportMode: this.mode,
+      });
       return;
     }
-    if (this.isLeader) this.engine?.retryNow();
+    this.engine?.setTransportMode?.(this.mode);
+    if (this.isLeader) {
+      // `start()` only begins a stopped engine; `retryNow()` forces an attempt
+      // when it is already running but idle (e.g. it started before the token).
+      this.engine?.start();
+      this.engine?.retryNow();
+    }
+  }
+
+  /** Switch the transport strategy at runtime (device preference). */
+  setTransportMode(mode: TransportMode): void {
+    this.mode = mode;
+    if (this.transport === 'shared-worker') {
+      this.port?.postMessage({ type: 'set-transport', mode });
+      return;
+    }
+    this.engine?.setTransportMode?.(mode);
   }
 
   disconnect(): void {
@@ -304,6 +341,9 @@ export class RealtimeClient {
       case 'snapshot':
         if (message.snapshot) this.applySnapshot(message.snapshot as EngineSnapshot);
         break;
+      case 'latency':
+        this.handlers.onLatency(Number(message.rttMs) || 0);
+        break;
       default:
         break;
     }
@@ -329,6 +369,24 @@ export class RealtimeClient {
     if (this.isLeader === isLeader) return;
     this.isLeader = isLeader;
     this.handlers.onLeaderChange(isLeader);
+    this.syncFallbackEngine();
+  }
+
+  /**
+   * In the in-tab fallback only the elected leader runs the engine (and thus
+   * owns the socket); every other tab keeps its engine stopped and consumes
+   * frames relayed over the bus. Starting the engine here is what makes the
+   * fallback actually connect — without it the leader had no link at all.
+   */
+  private syncFallbackEngine(): void {
+    if (this.transport !== 'in-tab-fallback' || !this.engine) return;
+    if (this.isLeader) {
+      this.engine.setTransportMode?.(this.mode);
+      this.engine.start();
+      this.engine.retryNow();
+    } else {
+      this.engine.stop(true);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -378,6 +436,9 @@ export class RealtimeClient {
         if (this.isLeader) {
           bus.post({ kind: BUS.SESSION_INVALID, reason: event.reason ?? 'session-invalid' } satisfies BusMessage);
         }
+        break;
+      case 'latency':
+        this.handlers.onLatency(event.rttMs ?? 0);
         break;
       default:
         break;

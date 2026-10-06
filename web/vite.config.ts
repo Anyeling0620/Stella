@@ -10,9 +10,15 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: false,
+    // Listen on all addresses. Without this Vite binds only the loopback name
+    // Node resolves `localhost` to (::1 here), while browsers may resolve it to
+    // 127.0.0.1 — so `http://localhost:5173` would be refused. `true` covers
+    // both stacks (and allows testing from another device on the LAN).
+    host: true,
   },
   preview: {
     port: 4173,
+    host: true,
   },
   build: {
     outDir: 'dist',

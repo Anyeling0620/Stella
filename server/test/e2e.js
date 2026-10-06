@@ -348,6 +348,35 @@ async function run() {
     await waitForFrame(alice.ws, (f) => f.type === 'chat:status' && f.status === 2);
   });
 
+  await check('friend list exposes the newest message for list previews', async () => {
+    const r = await api('GET', '/api/friends', { token: alice.access });
+    assert.strictEqual(r.status, 200);
+    const entry = r.data.friends.find((f) => f.id === bob.user.id);
+    assert.ok(entry, 'friend missing from the list');
+    assert.ok(entry.lastMessage, 'friend list did not include lastMessage');
+    assert.ok(typeof entry.lastMessage.content === 'string' && entry.lastMessage.content.length > 0);
+    assert.strictEqual(entry.lastMessage.fromUserId, bob.user.id, 'lastMessage should be the newest reply');
+  });
+
+  await check('friend list reports unread messages for the login snapshot', async () => {
+    // Bob sends a message Alice has not read yet.
+    const sent = await api('POST', '/api/messages', {
+      token: bob.access,
+      body: { toUserId: alice.user.id, content: 'unread ping', clientMsgId: `un-${uniq()}` },
+    });
+    assert.strictEqual(sent.status, 201, JSON.stringify(sent.body));
+
+    const r = await api('GET', '/api/friends', { token: alice.access });
+    const entry = r.data.friends.find((f) => f.id === bob.user.id);
+    assert.ok(entry.unread >= 1, `expected unread >= 1, got ${entry.unread}`);
+
+    // Reading it lowers the count on the next snapshot.
+    await api('POST', '/api/messages/read', { token: alice.access, body: { ids: [sent.data.message.id] } });
+    const after = await api('GET', '/api/friends', { token: alice.access });
+    const remaining = after.data.friends.find((f) => f.id === bob.user.id).unread;
+    assert.ok(remaining < entry.unread, `unread did not decrease (was ${entry.unread}, now ${remaining})`);
+  });
+
   console.log('\nToken governance');
   await check('refresh rotates the token pair', async () => {
     const r = await api('POST', '/api/auth/refresh', { body: { refreshToken: alice.refresh } });
@@ -779,6 +808,513 @@ async function run() {
     const del = await api('DELETE', `/api/friends/${pb.user.id}`);
     assert.strictEqual(del.status, 401);
   });
+
+  // -------------------------------------------------------------------------
+  // Group chat — WeChat-style direct add, unified messages table
+  // -------------------------------------------------------------------------
+  console.log('\nGroup chat');
+
+  const mkUser = async (prefix) => {
+    const account = { username: `${prefix}_${uniq()}`.slice(0, 32), password: 'passw0rd', nickname: prefix };
+    const reg = await api('POST', '/api/auth/register', { body: account });
+    assert.strictEqual(reg.status, 201, JSON.stringify(reg.body));
+    return reg.data;
+  };
+  const befriend = async (a, b) => {
+    const req = await api('POST', '/api/friends/requests', {
+      token: a.accessToken,
+      body: { toUserId: b.user.id },
+    });
+    assert.strictEqual(req.status, 201, JSON.stringify(req.body));
+    const acc = await api('POST', `/api/friends/requests/${req.data.request.id}/accept`, {
+      token: b.accessToken,
+    });
+    assert.strictEqual(acc.status, 200, JSON.stringify(acc.body));
+  };
+
+  const g1 = await mkUser('grp_a');
+  const g2 = await mkUser('grp_b');
+  const g3 = await mkUser('grp_c');
+  const outsider = await mkUser('grp_x');
+
+  await check('registers group users, befriends them and connects sockets', async () => {
+    await befriend(g1, g2);
+    await befriend(g1, g3);
+    g1.ws = openSocket(g1.accessToken);
+    g2.ws = openSocket(g2.accessToken);
+    g3.ws = openSocket(g3.accessToken);
+    await waitForOpen(g1.ws, 6000);
+    await waitForOpen(g2.ws, 6000);
+    await waitForOpen(g3.ws, 6000);
+  });
+
+  let groupId;
+  await check('creates a group and pushes group:created to every member', async () => {
+    const r = await api('POST', '/api/groups', {
+      token: g1.accessToken,
+      body: { name: 'E2E Group', memberIds: [g2.user.id] },
+    });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    assert.strictEqual(r.data.group.name, 'E2E Group');
+    assert.strictEqual(r.data.group.ownerId, g1.user.id);
+    assert.strictEqual(r.data.group.memberCount, 2);
+    groupId = r.data.group.id;
+
+    const frame = await waitForFrame(g2.ws, (f) => f.type === 'group:created' && f.group.id === groupId);
+    assert.strictEqual(frame.group.ownerId, g1.user.id);
+  });
+
+  await check('WS group message fans out with author info and mention ids', async () => {
+    const clientMsgId = `grp-${uniq()}`;
+    g1.ws.send(
+      JSON.stringify({
+        type: 'chat:send',
+        clientMsgId,
+        groupId,
+        content: 'hello group',
+        mentions: [g2.user.id],
+      })
+    );
+    const inbound = await waitForFrame(
+      g2.ws,
+      (f) => f.type === 'chat:message' && f.message.clientMsgId === clientMsgId
+    );
+    assert.strictEqual(inbound.message.groupId, groupId);
+    assert.strictEqual(inbound.message.fromUserId, g1.user.id);
+    assert.strictEqual(inbound.message.fromUser.id, g1.user.id);
+    assert.deepStrictEqual(inbound.message.mentions, [g2.user.id]);
+
+    const echo = await waitForFrame(
+      g1.ws,
+      (f) => f.type === 'chat:message' && f.message.clientMsgId === clientMsgId
+    );
+    assert.ok(echo.message.id > 0, 'group echo has no id');
+    g2.lastGroupMessageId = echo.message.id;
+  });
+
+  await check('HTTP group send reaches the other members', async () => {
+    const r = await api('POST', '/api/messages', {
+      token: g2.accessToken,
+      body: { groupId, content: 'reply in group', clientMsgId: `grp-${uniq()}` },
+    });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    const frame = await waitForFrame(
+      g1.ws,
+      (f) => f.type === 'chat:message' && f.message.content === 'reply in group'
+    );
+    assert.strictEqual(frame.message.groupId, groupId);
+  });
+
+  await check('group history is chronological and includes the system notice', async () => {
+    const r = await api('GET', `/api/groups/${groupId}/messages?limit=50`, { token: g1.accessToken });
+    assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+    assert.strictEqual(r.data.group.id, groupId);
+    assert.ok(r.data.members.some((m) => m.id === g2.user.id), 'member roster missing');
+    const contents = r.data.messages.map((m) => m.content);
+    assert.ok(contents.includes('hello group'));
+    assert.ok(contents.includes('reply in group'));
+    assert.ok(r.data.messages.some((m) => m.type === 'system'), 'creation system notice missing');
+    const ids = r.data.messages.map((m) => m.id);
+    assert.deepStrictEqual(ids, [...ids].sort((x, y) => x - y), 'group history not ascending');
+  });
+
+  await check('incremental poll includes group messages past the cursor', async () => {
+    const baseline = await api('GET', '/api/messages/poll?sinceId=0', { token: g3.accessToken });
+    // g3 is not a member yet, so they should NOT see the group.
+    assert.ok(
+      !baseline.data.messages.some((m) => m.groupId === groupId),
+      'non-member received group rows through polling'
+    );
+
+    const r = await api('GET', '/api/messages/poll?sinceId=0', { token: g2.accessToken });
+    assert.ok(
+      r.data.messages.some((m) => m.groupId === groupId),
+      'member poll missed group messages'
+    );
+  });
+
+  await check('unread + @mention flags surface, then clear after read', async () => {
+    const before = await api('GET', '/api/groups', { token: g2.accessToken });
+    const entry = before.data.groups.find((g) => g.id === groupId);
+    assert.ok(entry, 'group missing from g2 list');
+    assert.ok(entry.unread >= 1, `expected unread >= 1, got ${entry.unread}`);
+    assert.strictEqual(entry.mentioned, true, 'mention flag not set');
+
+    const read = await api('POST', `/api/groups/${groupId}/read`, {
+      token: g2.accessToken,
+      body: { lastMessageId: 999_999_999 },
+    });
+    assert.strictEqual(read.status, 200);
+
+    const after = await api('GET', '/api/groups', { token: g2.accessToken });
+    const entry2 = after.data.groups.find((g) => g.id === groupId);
+    assert.strictEqual(entry2.unread, 0, 'unread did not clear after read');
+    assert.strictEqual(entry2.mentioned, false, 'mention flag did not clear');
+  });
+
+  await check('only the owner may edit group profile; edits push group:updated', async () => {
+    const denied = await api('PATCH', `/api/groups/${groupId}`, {
+      token: g2.accessToken,
+      body: { name: 'nope' },
+    });
+    assert.strictEqual(denied.status, 403);
+    assert.strictEqual(denied.body.code, 'NOT_GROUP_OWNER');
+
+    const renamed = await api('PATCH', `/api/groups/${groupId}`, {
+      token: g1.accessToken,
+      body: { name: 'E2E Renamed', announcement: 'welcome' },
+    });
+    assert.strictEqual(renamed.status, 200, JSON.stringify(renamed.body));
+    assert.strictEqual(renamed.data.group.name, 'E2E Renamed');
+
+    const frame = await waitForFrame(
+      g2.ws,
+      (f) => f.type === 'group:updated' && f.group.id === groupId && f.group.name === 'E2E Renamed'
+    );
+    assert.strictEqual(frame.group.announcement, 'welcome');
+  });
+
+  await check('owner adds a friend to the group', async () => {
+    // A non-friend cannot be pulled in.
+    const rejected = await api('POST', `/api/groups/${groupId}/members`, {
+      token: g1.accessToken,
+      body: { userIds: [outsider.user.id] },
+    });
+    assert.strictEqual(rejected.status, 200);
+    assert.deepStrictEqual(rejected.data.added, [], 'non-friend was added');
+
+    const added = await api('POST', `/api/groups/${groupId}/members`, {
+      token: g1.accessToken,
+      body: { userIds: [g3.user.id] },
+    });
+    assert.strictEqual(added.status, 200, JSON.stringify(added.body));
+    assert.deepStrictEqual(added.data.added, [g3.user.id]);
+
+    const frame = await waitForFrame(g3.ws, (f) => f.type === 'group:member_added' && Number(f.groupId) === groupId);
+    assert.ok(frame.members.some((m) => m.id === g3.user.id));
+  });
+
+  await check('a newly added member can send; a removed member cannot', async () => {
+    const ok = await api('POST', '/api/messages', {
+      token: g3.accessToken,
+      body: { groupId, content: 'hi from g3', clientMsgId: `grp-${uniq()}` },
+    });
+    assert.strictEqual(ok.status, 201, JSON.stringify(ok.body));
+
+    const removed = await api('DELETE', `/api/groups/${groupId}/members/${g3.user.id}`, {
+      token: g1.accessToken,
+    });
+    assert.strictEqual(removed.status, 200, JSON.stringify(removed.body));
+
+    const removedFrame = await waitForFrame(
+      g3.ws,
+      (f) => f.type === 'group:member_removed' && f.removedUserId === g3.user.id
+    );
+    assert.ok(removedFrame, 'removed member was not notified');
+
+    const denied = await api('POST', '/api/messages', {
+      token: g3.accessToken,
+      body: { groupId, content: 'should fail', clientMsgId: `grp-${uniq()}` },
+    });
+    assert.strictEqual(denied.status, 403);
+    assert.strictEqual(denied.body.code, 'NOT_GROUP_MEMBER');
+
+    const historyDenied = await api('GET', `/api/groups/${groupId}/messages`, { token: g3.accessToken });
+    assert.strictEqual(historyDenied.status, 403);
+  });
+
+  await check('mentions of non-members are dropped by the server', async () => {
+    const r = await api('POST', '/api/messages', {
+      token: g1.accessToken,
+      body: { groupId, content: 'mention ghost', clientMsgId: `grp-${uniq()}`, mentions: [g3.user.id] },
+    });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    assert.deepStrictEqual(r.data.message.mentions, [], 'non-member mention was persisted');
+  });
+
+  await check('a member can leave; afterwards they lose access', async () => {
+    const left = await api('POST', `/api/groups/${groupId}/leave`, { token: g2.accessToken });
+    assert.strictEqual(left.status, 200, JSON.stringify(left.body));
+    assert.strictEqual(left.data.left, true);
+
+    const denied = await api('POST', '/api/messages', {
+      token: g2.accessToken,
+      body: { groupId, content: 'still here?', clientMsgId: `grp-${uniq()}` },
+    });
+    assert.strictEqual(denied.status, 403);
+  });
+
+  await check('only the owner may dissolve; after dissolve it is gone', async () => {
+    const denied = await api('DELETE', `/api/groups/${groupId}`, { token: g2.accessToken });
+    assert.strictEqual(denied.status, 403);
+
+    const dissolved = await api('DELETE', `/api/groups/${groupId}`, { token: g1.accessToken });
+    assert.strictEqual(dissolved.status, 200, JSON.stringify(dissolved.body));
+    assert.strictEqual(dissolved.data.dissolved, true);
+
+    const gone = await api('GET', `/api/groups/${groupId}/messages`, { token: g1.accessToken });
+    assert.strictEqual(gone.status, 404);
+  });
+
+  await check('group endpoints require authentication', async () => {
+    const list = await api('GET', '/api/groups');
+    assert.strictEqual(list.status, 401);
+    const create = await api('POST', '/api/groups', { body: { name: 'x', memberIds: [] } });
+    assert.strictEqual(create.status, 401);
+  });
+
+  console.log('\nGroup discovery & join requests');
+
+  let joinGroupId;
+  let joinGroupNo;
+  await check('a new group carries a searchable 群号', async () => {
+    const r = await api('POST', '/api/groups', {
+      token: g1.accessToken,
+      body: { name: 'Joinable', memberIds: [g2.user.id] },
+    });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    joinGroupId = r.data.group.id;
+    joinGroupNo = r.data.group.groupNo;
+    assert.ok(Number.isInteger(joinGroupNo) && joinGroupNo > 0, `groupNo missing: ${joinGroupNo}`);
+
+    outsider.ws = openSocket(outsider.accessToken);
+    await waitForOpen(outsider.ws, 6000);
+  });
+
+  await check('groups are searchable by 群号 and by name', async () => {
+    const byNo = await api('GET', `/api/groups/search?q=${joinGroupNo}`, { token: outsider.accessToken });
+    assert.strictEqual(byNo.status, 200);
+    assert.ok(byNo.data.groups.some((g) => g.id === joinGroupId), 'search by 群号 missed the group');
+
+    const byName = await api('GET', '/api/groups/search?q=Joinable', { token: outsider.accessToken });
+    assert.ok(byName.data.groups.some((g) => g.id === joinGroupId), 'search by name missed the group');
+  });
+
+  await check('applying to join notifies the owner and is idempotent', async () => {
+    const first = await api('POST', `/api/groups/${joinGroupId}/join-requests`, {
+      token: outsider.accessToken,
+      body: { message: 'let me in' },
+    });
+    assert.strictEqual(first.status, 201, JSON.stringify(first.body));
+    assert.strictEqual(first.data.status, 'pending');
+
+    const frame = await waitForFrame(
+      g1.ws,
+      (f) => f.type === 'group:join_requested' && Number(f.groupId) === joinGroupId
+    );
+    assert.strictEqual(frame.request.applicant.id, outsider.user.id);
+    assert.strictEqual(frame.request.message, 'let me in');
+    const requestId = frame.request.id;
+
+    const again = await api('POST', `/api/groups/${joinGroupId}/join-requests`, {
+      token: outsider.accessToken,
+      body: { message: 'let me in' },
+    });
+    assert.strictEqual(again.status, 201);
+    assert.strictEqual(again.data.id, requestId, 'a second row was created instead of upserting');
+
+    outsider.joinRequestId = requestId;
+  });
+
+  await check('a member who is not the owner cannot list or decide requests', async () => {
+    const list = await api('GET', `/api/groups/${joinGroupId}/join-requests`, { token: g2.accessToken });
+    assert.strictEqual(list.status, 403);
+    assert.strictEqual(list.body.code, 'NOT_GROUP_OWNER');
+
+    const decide = await api('POST', `/api/groups/${joinGroupId}/join-requests/${outsider.joinRequestId}/reject`, {
+      token: g2.accessToken,
+    });
+    assert.strictEqual(decide.status, 403);
+  });
+
+  await check('owner sees the pending application and approves it', async () => {
+    const list = await api('GET', `/api/groups/${joinGroupId}/join-requests`, { token: g1.accessToken });
+    assert.strictEqual(list.status, 200);
+    assert.ok(
+      list.data.requests.some((r) => r.id === outsider.joinRequestId && r.applicant.id === outsider.user.id),
+      'pending request not listed for the owner'
+    );
+
+    const approved = await api(
+      'POST',
+      `/api/groups/${joinGroupId}/join-requests/${outsider.joinRequestId}/approve`,
+      { token: g1.accessToken }
+    );
+    assert.strictEqual(approved.status, 200, JSON.stringify(approved.body));
+    assert.strictEqual(approved.data.status, 'approved');
+
+    const frame = await waitForFrame(
+      outsider.ws,
+      (f) => f.type === 'group:join_result' && f.status === 'approved'
+    );
+    assert.ok(frame, 'applicant was not told the application was approved');
+  });
+
+  await check('an approved applicant becomes a member and can send', async () => {
+    const send = await api('POST', '/api/messages', {
+      token: outsider.accessToken,
+      body: { groupId: joinGroupId, content: 'thanks for the add', clientMsgId: `grp-${uniq()}` },
+    });
+    assert.strictEqual(send.status, 201, JSON.stringify(send.body));
+
+    // They now belong, so the group is no longer a search hit for them.
+    const search = await api('GET', `/api/groups/search?q=${joinGroupNo}`, { token: outsider.accessToken });
+    assert.ok(!search.data.groups.some((g) => g.id === joinGroupId), 'member still sees the group in search');
+  });
+
+  await check('a rejected applicant is told, and can apply again', async () => {
+    const applied = await api('POST', `/api/groups/${joinGroupId}/join-requests`, {
+      token: g3.accessToken,
+      body: { message: 'me too' },
+    });
+    assert.strictEqual(applied.status, 201, JSON.stringify(applied.body));
+
+    const rejected = await api(
+      'POST',
+      `/api/groups/${joinGroupId}/join-requests/${applied.data.id}/reject`,
+      { token: g1.accessToken }
+    );
+    assert.strictEqual(rejected.status, 200);
+    assert.strictEqual(rejected.data.status, 'rejected');
+
+    const frame = await waitForFrame(g3.ws, (f) => f.type === 'group:join_result' && f.status === 'rejected');
+    assert.ok(frame, 'applicant was not told the application was rejected');
+
+    const reapplied = await api('POST', `/api/groups/${joinGroupId}/join-requests`, {
+      token: g3.accessToken,
+      body: { message: 'please' },
+    });
+    assert.strictEqual(reapplied.status, 201);
+    assert.strictEqual(reapplied.data.status, 'pending', 'a rejected application could not be revived');
+  });
+
+  await check('group join endpoints require authentication', async () => {
+    const search = await api('GET', '/api/groups/search?q=Joinable');
+    assert.strictEqual(search.status, 401);
+  });
+
+  await api('DELETE', `/api/groups/${joinGroupId}`, { token: g1.accessToken });
+
+  console.log('\nAttachments (image / file)');
+
+  const upload = async (token, filename, mime, bytes) => {
+    const form = new FormData();
+    form.append('file', new Blob([bytes], { type: mime }), filename);
+    const res = await fetch(`${BASE}/api/attachments`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const payload = await res.json().catch(() => null);
+    return { status: res.status, body: payload, data: payload && payload.data };
+  };
+
+  const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8]);
+  let imageAttachmentId;
+  let imageSize;
+
+  await check('uploads an image, reported as an image attachment', async () => {
+    const r = await upload(g1.accessToken, 'photo.png', 'image/png', PNG_BYTES);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    assert.strictEqual(r.data.attachment.kind, 'image');
+    assert.strictEqual(r.data.attachment.name, 'photo.png');
+    assert.strictEqual(r.data.attachment.size, PNG_BYTES.length);
+    imageAttachmentId = r.data.attachment.id;
+    imageSize = r.data.attachment.size;
+  });
+
+  await check('a non-whitelisted image mime is stored as a generic file', async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>', 'utf8');
+    const r = await upload(g1.accessToken, 'evil.svg', 'image/svg+xml', svg);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    assert.strictEqual(r.data.attachment.kind, 'file', 'SVG must not be served as an inline image');
+  });
+
+  await check('an image over the size cap is rejected', async () => {
+    const big = Buffer.alloc(11 * 1024 * 1024, 1); // > 10MB
+    const r = await upload(g1.accessToken, 'big.png', 'image/png', big);
+    assert.strictEqual(r.status, 400, JSON.stringify(r.body));
+    assert.strictEqual(r.body.code, 'IMAGE_TOO_LARGE');
+  });
+
+  await check('sending an image message persists type + attachment and fans out', async () => {
+    const clientMsgId = `img-${uniq()}`;
+    const r = await api('POST', '/api/messages', {
+      token: g1.accessToken,
+      body: { toUserId: g2.user.id, clientMsgId, attachmentId: imageAttachmentId },
+    });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    assert.strictEqual(r.data.message.type, 'image');
+    assert.strictEqual(r.data.message.content, '[图片]');
+    assert.strictEqual(r.data.message.attachment.id, imageAttachmentId);
+
+    const frame = await waitForFrame(
+      g2.ws,
+      (f) => f.type === 'chat:message' && f.message.clientMsgId === clientMsgId
+    );
+    assert.strictEqual(frame.message.type, 'image');
+    assert.strictEqual(frame.message.attachment.name, 'photo.png');
+  });
+
+  await check('someone else cannot send my attachment', async () => {
+    const r = await api('POST', '/api/messages', {
+      token: g2.accessToken,
+      body: { toUserId: g1.user.id, attachmentId: imageAttachmentId, clientMsgId: `x-${uniq()}` },
+    });
+    assert.strictEqual(r.status, 403);
+    assert.strictEqual(r.body.code, 'ATTACHMENT_FORBIDDEN');
+  });
+
+  await check('raw bytes require a token and match the upload', async () => {
+    const noAuth = await fetch(`${BASE}/api/attachments/${imageAttachmentId}/raw`);
+    assert.strictEqual(noAuth.status, 401);
+
+    const withAuth = await fetch(
+      `${BASE}/api/attachments/${imageAttachmentId}/raw?token=${encodeURIComponent(g1.accessToken)}`
+    );
+    assert.strictEqual(withAuth.status, 200);
+    assert.strictEqual(withAuth.headers.get('content-type'), 'image/png');
+    const bytes = Buffer.from(await withAuth.arrayBuffer());
+    assert.strictEqual(bytes.length, imageSize);
+    assert.ok(bytes.equals(PNG_BYTES), 'served bytes differ from the uploaded ones');
+  });
+
+  await check('a group file message reaches history with its attachment', async () => {
+    const created = await api('POST', '/api/groups', {
+      token: g1.accessToken,
+      body: { name: 'Media', memberIds: [g2.user.id] },
+    });
+    const gid = created.data.group.id;
+    const up = await upload(g1.accessToken, 'notes.txt', 'text/plain', Buffer.from('hello attachment', 'utf8'));
+    assert.strictEqual(up.data.attachment.kind, 'file');
+
+    const sent = await api('POST', '/api/messages', {
+      token: g1.accessToken,
+      body: { groupId: gid, attachmentId: up.data.attachment.id, clientMsgId: `gfile-${uniq()}` },
+    });
+    assert.strictEqual(sent.status, 201, JSON.stringify(sent.body));
+    assert.strictEqual(sent.data.message.type, 'file');
+    assert.ok(sent.data.message.content.startsWith('[文件]'), sent.data.message.content);
+
+    const history = await api('GET', `/api/groups/${gid}/messages`, { token: g2.accessToken });
+    const media = history.data.messages.find((m) => m.attachment && m.attachment.name === 'notes.txt');
+    assert.ok(media, 'group history lost the attachment');
+    assert.strictEqual(media.type, 'file');
+
+    await api('DELETE', `/api/groups/${gid}`, { token: g1.accessToken });
+  });
+
+  await check('attachment endpoints require authentication', async () => {
+    const form = new FormData();
+    form.append('file', new Blob([Buffer.from('x')], { type: 'text/plain' }), 'x.txt');
+    const res = await fetch(`${BASE}/api/attachments`, { method: 'POST', body: form });
+    assert.strictEqual(res.status, 401);
+  });
+
+  g1.ws.close();
+  g2.ws.close();
+  g3.ws.close();
+  outsider.ws.close();
 
   pa.ws.close();
   pb.ws.close();

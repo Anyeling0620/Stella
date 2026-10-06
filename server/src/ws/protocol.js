@@ -7,14 +7,14 @@
  * `web/src/context/AppContext.tsx` and `web/src/pages/ChatShell.tsx`) — there is
  * no shared generated module, so adding an event means updating both sides.
  */
-const CLIENT = {
+const CLIENT = { // 这是一个定义WebSocket客户端事件类型的对象，用于在客户端和服务器之间进行通信
   PING: 'ping',
   AUTH_REFRESH: 'auth:refresh',
   CHAT_SEND: 'chat:send',
   MESSAGE_READ: 'message:read',
 };
 
-const SERVER = {
+const SERVER = {  // 这是一个定义WebSocket服务器端事件类型的对象，用于在客户端和服务器之间进行通信
   READY: 'ready',
   AUTH_OK: 'auth:ok',
   PONG: 'pong',
@@ -29,6 +29,17 @@ const SERVER = {
   PROFILE_UPDATED: 'profile:updated',
   SYSTEM_NOTICE: 'notice:system',
   SESSION_INVALID: 'session:invalid',
+  // Group chat lifecycle. Each is fanned out to every member's tabs.
+  GROUP_CREATED: 'group:created',
+  GROUP_UPDATED: 'group:updated',
+  GROUP_MEMBER_ADDED: 'group:member_added',
+  GROUP_MEMBER_REMOVED: 'group:member_removed',
+  GROUP_MEMBER_LEFT: 'group:member_left',
+  GROUP_DISSOLVED: 'group:dissolved',
+  /** An applicant asks to join: pushed to the group owner's tabs. */
+  GROUP_JOIN_REQUESTED: 'group:join_requested',
+  /** The owner's verdict on my application: pushed to the applicant. */
+  GROUP_JOIN_RESULT: 'group:join_result',
 };
 
 /**

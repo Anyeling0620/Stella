@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { friendApi } from '../lib/api';
 import { ApiError, isCancelError } from '../lib/axiosClient';
+import { convKey } from '../lib/conversation';
 import { useAppActions } from '../context/AppContext';
 import { Avatar } from '../components/Avatar';
 import type { FriendRequest, User } from '../types';
@@ -8,7 +9,8 @@ import type { FriendRequest, User } from '../types';
 interface FriendsPanelProps {
   friends: User[];
   requests: FriendRequest[];
-  unread: Record<number, number>;
+  /** Unread counts keyed by conversation key (`d:<id>`). */
+  unread: Record<string, number>;
   onRespond: (requestId: number, action: 'accept' | 'reject') => Promise<void>;
   onOpenConversation: (friendId: number) => void;
   /** One-way removal: drops the friend from MY list only. */
@@ -237,7 +239,9 @@ export const FriendsPanel = memo(function FriendsPanel({
                   <span className="list-row-title">{friend.nickname}</span>
                   <span className="list-row-sub">@{friend.username}</span>
                 </span>
-                {(unread[friend.id] ?? 0) > 0 && <span className="badge badge-unread">{unread[friend.id]}</span>}
+                {(unread[convKey.direct(friend.id)] ?? 0) > 0 && (
+                  <span className="badge badge-unread">{unread[convKey.direct(friend.id)]}</span>
+                )}
               </button>
               <button
                 type="button"

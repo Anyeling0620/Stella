@@ -321,9 +321,27 @@ textarea {
    -------------------------------------------------------------------------- */
 .shell {
   display: grid;
-  grid-template-columns: 330px 1fr;
+  /* `--sidebar-w` is written directly by the splitter drag (no React state). */
+  grid-template-columns: var(--sidebar-w, 330px) 5px 1fr;
   height: 100%;
   min-height: 0;
+}
+
+.shell.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+/* Draggable divider between the sidebar and the conversation pane. */
+.splitter {
+  background: var(--border);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.splitter:hover,
+.shell.resizing .splitter {
+  background: var(--accent);
 }
 
 .sidebar {
@@ -331,7 +349,6 @@ textarea {
   flex-direction: column;
   min-height: 0;
   background: var(--surface);
-  border-right: var(--border-w) solid var(--border);
 }
 
 .sidebar-header {
@@ -425,7 +442,8 @@ textarea {
 
 .sidebar-footer {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: start;
   justify-content: space-between;
   gap: 10px;
   border-top: var(--border-w) solid var(--border);
@@ -502,6 +520,46 @@ textarea {
   color: var(--dim);
 }
 
+/* WeChat-style two-line row: name+time on top, preview+badge below. */
+.conversation-body {
+  display: grid;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.conversation-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.conversation-top .conversation-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.conversation-time {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.conversation-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.conversation-bottom .conversation-sub {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* --------------------------------------------------------------------------
    Friends panel
    -------------------------------------------------------------------------- */
@@ -562,16 +620,23 @@ textarea {
 }
 
 .list-row.row-confirm {
-  /* Stack the prompt above the buttons: in a 330px rail, side-by-side
-     truncates the peer name to nothing. */
+  /* Avatar + prompt on the first line, actions on their own line beneath — a
+     330px rail cannot fit avatar + name + two buttons side by side. */
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px 10px;
   border-color: var(--accent);
   background: var(--surface-2);
 }
 
+.list-row.row-confirm .list-row-main {
+  display: grid;
+  gap: 2px;
+}
+
 .list-row.row-confirm .list-row-actions {
+  grid-column: 1 / -1;
   justify-content: flex-end;
 }
 
@@ -722,7 +787,9 @@ textarea {
 .bubble-row {
   display: flex;
   gap: 8px;
-  align-items: flex-end;
+  /* Align the avatar with the BUBBLE, not the timestamp beneath it (WeChat).
+     The meta line therefore hangs below the avatar's bottom edge. */
+  align-items: flex-start;
 }
 
 .bubble-row.mine {
@@ -792,11 +859,11 @@ textarea {
   gap: 10px;
   padding: 12px 18px calc(12px + env(safe-area-inset-bottom));
   background: var(--surface);
-  border-top: var(--border-w) solid var(--border);
 }
 
 .chat-composer textarea {
   flex: 1;
+  min-height: 40px;
   resize: none;
   background: var(--bg);
   border: var(--border-w-sm) solid var(--border);
@@ -804,6 +871,9 @@ textarea {
   padding: 10px 12px;
   outline: none;
   line-height: 1.5;
+  /* Auto-grows via a ref (capped at 160px); when the composer is dragged taller
+     it stretches to fill and scrolls internally. */
+  overflow-y: auto;
 }
 
 .chat-composer textarea:focus {
@@ -1255,7 +1325,7 @@ textarea {
 /* Narrow laptops / tablets: keep two panes, shrink the rail. */
 @media (max-width: 900px) {
   .shell {
-    grid-template-columns: 262px 1fr;
+    grid-template-columns: 262px 5px 1fr;
   }
 }
 
@@ -1267,6 +1337,14 @@ textarea {
   .shell {
     grid-template-columns: 1fr;
     height: 100dvh;
+  }
+
+  .splitter {
+    display: none;
+  }
+
+  .composer-resizer {
+    display: none;
   }
 
   .main {
@@ -1326,3 +1404,535 @@ textarea {
     grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
   }
 }
+
+/* --------------------------------------------------------------------------
+   Group chat — unified list, in-thread notices, @mentions, roster
+   -------------------------------------------------------------------------- */
+.sidebar-tabs .sidebar-new-group {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-left: var(--border-w-sm) solid var(--border);
+  background: transparent;
+  color: var(--accent-ink);
+  padding: 11px 15px;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sidebar-tabs .sidebar-new-group:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.badge-mention {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.chat-header-action {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.group-announcement {
+  border-bottom: var(--border-w-sm) solid var(--border);
+  background: var(--surface-2);
+  padding: 9px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.chat-system {
+  margin: 8px auto;
+  max-width: 82%;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.bubble-sender {
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.bubble-mention {
+  border-color: var(--accent);
+}
+
+.mention {
+  color: var(--accent-ink);
+  font-weight: 700;
+}
+
+.bubble-mine .mention {
+  color: var(--on-accent);
+  text-decoration: underline;
+}
+
+/* Composer: stack the @-popover above the input row. */
+.chat-composer {
+  flex-direction: column;
+  align-items: stretch;
+  /* Height floor set by dragging the resizer; 0 => content-sized (auto-grow). */
+  min-height: var(--composer-h, 0px);
+}
+
+/* Drag handle for the composer height (sits above the input row). Kept visually
+   transparent so it does not double up with the composer's own top border; it
+   lights up on hover as the grab affordance. */
+.composer-resizer {
+  flex: 0 0 auto;
+  height: 4px;
+  background: var(--border);
+  cursor: row-resize;
+  touch-action: none;
+
+}
+
+.composer-resizer:hover {
+  background: var(--accent);
+}
+
+.composer-row {
+  display: flex;
+  flex-direction: column;   /* 上下两行 */
+  gap: 10px;
+  width: 100%;
+  flex: 1;
+  min-height: 0;            /* 允许 textarea 用 flex:1 收缩 */
+}
+
+/* 工具栏一行 */
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;           /* 不参与纵向伸缩，保持自身高度 */
+}
+
+/* 发送按钮推到最右 */
+.composer-toolbar > .btn {
+  margin-left: auto;
+}
+
+/* textarea 吃满剩余高度 */
+.composer-row > textarea {
+  flex: 1 1 auto;
+  min-height: 60px;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.composer-mention {
+  flex: 0 0 auto;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.mention-popover {
+  border: var(--border-w-sm) solid var(--border);
+  background: var(--surface-2);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.mention-popover-title {
+  padding: 8px 10px;
+  border-bottom: var(--border-w-sm) solid var(--border);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.mention-option,
+.member-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: var(--border-w-sm) solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mention-option:hover,
+.member-option:hover {
+  border-color: var(--border);
+}
+
+.member-option.selected {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.member-option-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.member-option-check {
+  font-family: var(--font-mono);
+  color: var(--accent-ink);
+}
+
+.member-picker {
+  display: grid;
+  gap: 4px;
+  border: var(--border-w-sm) solid var(--dim);
+  padding: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.member-picker-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.group-info-avatar {
+  display: flex;
+  justify-content: center;
+}
+
+.group-info-name {
+  font-size: 16px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.group-info-no {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: var(--border-w-sm) solid var(--dim);
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.group-info-no code {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--accent-ink);
+  letter-spacing: 0.08em;
+}
+
+.group-info-no button {
+  margin-left: auto;
+}
+
+.group-info-announcement-text {
+  border: var(--border-w-sm) solid var(--dim);
+  padding: 10px 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.field textarea {
+  background: var(--bg);
+  border: var(--border-w-sm) solid var(--border);
+  border-radius: 0;
+  padding: 10px 12px;
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+  outline: none;
+}
+
+.field textarea:focus {
+  border-color: var(--accent);
+}
+
+.dialog-foot-spacer {
+  flex: 1;
+}
+
+.dialog-confirm-text {
+  align-self: center;
+  font-size: 12px;
+  color: var(--accent-ink);
+}
+
+.btn-danger {
+  border-color: var(--accent-ink);
+  background: transparent;
+  color: var(--accent-ink);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* --------------------------------------------------------------------------
+   Media messages — image bubbles, file cards, emoji panel, image lightbox
+   -------------------------------------------------------------------------- */
+.bubble-media {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.bubble-image-btn {
+  position: relative;
+  display: block;
+  padding: 0;
+  max-width: 260px;
+  border: var(--border-w-sm) solid var(--border);
+  background: var(--surface-2);
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.bubble-image-btn:disabled {
+  cursor: default;
+}
+
+.bubble-image {
+  display: block;
+  max-width: 260px;
+  max-height: 260px;
+  object-fit: cover;
+}
+
+.media-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 160px;
+  height: 120px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.media-progress {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.bubble-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 200px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border: var(--border-w-sm) solid var(--border);
+  background: var(--surface-2);
+}
+
+.file-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.file-main {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-name {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-size {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.file-progress {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-ink);
+}
+
+.file-download {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border: var(--border-w-sm) solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.file-download:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* Attach menu + emoji panel sit above the input row. */
+.attach-menu {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border: var(--border-w-sm) solid var(--border);
+  background: var(--surface-2);
+}
+
+.attach-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: var(--border-w-sm) solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.attach-option:hover {
+  border-color: var(--border);
+  background: var(--bg);
+}
+
+.emoji-panel {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 2px;
+  padding: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: var(--border-w-sm) solid var(--border);
+  background: var(--surface-2);
+}
+
+.emoji-option {
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.emoji-option:hover {
+  background: var(--bg);
+}
+
+.composer-tool {
+  flex: 0 0 auto;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  font-size: 16px;
+}
+
+.composer-emoji {
+  font-size: 18px;
+}
+
+.image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.85);
+  cursor: zoom-out;
+}
+
+.image-preview img {
+  max-width: 92vw;
+  max-height: 92vh;
+  border: var(--border-w) solid var(--border);
+}
+
+@media (max-width: 640px) {
+  .emoji-panel {
+    grid-template-columns: repeat(8, 1fr);
+  }
+}
+
+/* Segmented radio (settings dialog) — used by the 连接策略 switch. */
+.segmented {
+  display: flex;
+  border: var(--border-w-sm) solid var(--border);
+}
+
+.segmented button {
+  flex: 1;
+  border: 0;
+  border-right: var(--border-w-sm) solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 9px 10px;
+  font-weight: 700;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button.active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+/* Real-time network status label (bottom-left footer). */
+.status-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.status-text[data-tone='bad'] {
+  color: var(--accent-ink);
+}
+
+.status-latency {
+  font-size: 10px;
+  color: var(--dim);
+}
+

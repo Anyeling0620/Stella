@@ -81,6 +81,12 @@
     let everConnected = false;
     let pollingActive = false;
     /**
+     * Transport strategy. `'auto'` prefers WebSocket and degrades to polling on
+     * failure; `'poll'` disables WebSocket entirely (forced HTTP polling) — the
+     * user-facing "连接策略" switch.
+     */
+    let transportMode = options.transportMode === 'poll' ? 'poll' : 'auto';
+    /**
      * True between "we decided to open a socket" and "it opened / it closed".
      * Without this the engine could start a *second* socket while the first was
      * still CONNECTING (e.g. React StrictMode double-mount, or a fast
@@ -174,6 +180,11 @@
     // -------------------------------------------------------------------------
     function connect() {
       if (!running || graceful) return Promise.resolve();
+      // Forced polling: never open a socket.
+      if (transportMode === 'poll') {
+        startPolling('forced-poll');
+        return Promise.resolve();
+      }
       if (!supportsWebSocket()) {
         startPolling('websocket-unsupported');
         return Promise.resolve();
@@ -272,6 +283,11 @@
       }
       if (!frame || typeof frame.type !== 'string') return;
 
+      // A pong closes the RTT sample opened when we sent the ping.
+      if (frame.type === 'pong' && pendingPingAt) {
+        emit({ type: 'latency', rttMs: Math.max(0, now() - pendingPingAt) });
+      }
+
       // Any inbound traffic proves the link is alive.
       pendingPingAt = 0;
 
@@ -327,6 +343,8 @@
 
     function scheduleReconnect() {
       if (!running || graceful) return;
+      // In forced-poll mode polling already keeps the app alive; never reconnect.
+      if (transportMode === 'poll') return;
       attempt += 1;
 
       if (attempt > options.maxReconnectAttempts) {
@@ -451,7 +469,7 @@
     // Background WebSocket recovery while degraded
     // -------------------------------------------------------------------------
     function startRecovery() {
-      if (!supportsWebSocket() || recoveryTimer) return;
+      if (transportMode === 'poll' || !supportsWebSocket() || recoveryTimer) return;
       recoveryTimer = setInterval(() => {
         if (!running || graceful || !pollingActive || socket) return;
         log('background WebSocket recovery probe');
@@ -553,6 +571,46 @@
       connect();
     }
 
+    /**
+     * Switches the transport strategy at runtime.
+     *   'poll' -> close any socket and force HTTP polling;
+     *   'auto' -> stop polling and (re)establish the WebSocket.
+     */
+    function setTransportMode(mode) {
+      const next = mode === 'poll' ? 'poll' : 'auto';
+      if (next === transportMode) return;
+      transportMode = next;
+      if (!running || graceful) return;
+
+      if (transportMode === 'poll') {
+        clearTimer('reconnect');
+        stopHeartbeat();
+        stopRecovery();
+        if (socket) {
+          const dying = socket;
+          socket = null;
+          connecting = false;
+          // Detach handlers so the close does not trigger a reconnect.
+          try {
+            dying.onopen = null;
+            dying.onmessage = null;
+            dying.onerror = null;
+            dying.onclose = null;
+            dying.close(1000, 'transport switched to polling');
+          } catch {
+            /* ignore */
+          }
+        }
+        startPolling('forced-poll');
+        return;
+      }
+
+      // Back to auto: drop polling and reconnect the socket immediately.
+      stopPolling();
+      attempt = 0;
+      connect();
+    }
+
     function send(frame) {
       if (!isOpen()) return false;
       try {
@@ -569,6 +627,7 @@
         mode,
         attempt,
         lastError,
+        transportMode,
         cursor: { ...cursor },
         pollIntervalMs,
         connected: isOpen(),
@@ -581,6 +640,7 @@
       start,
       stop,
       retryNow,
+      setTransportMode,
       send,
       isOpen,
       setCursor,

@@ -9,9 +9,18 @@ import React, {
 } from 'react';
 import { authApi, refreshAccessToken } from '../lib/api';
 import { setAuthHooks } from '../lib/axiosClient';
+import { STORAGE_KEYS } from '../config';
 import { RealtimeClient } from '../lib/realtime';
 import { broadcastLogout, initCrossTabLogout, session } from '../lib/session';
 import { uid } from '../lib/storage';
+import {
+  readStoredTransportHost,
+  readStoredTransportMode,
+  writeStoredTransportHost,
+  writeStoredTransportMode,
+  type TransportHost,
+  type TransportMode,
+} from '../lib/transport';
 import type {
   RealtimeStatus,
   ServerFrame,
@@ -56,13 +65,18 @@ export interface AppActions {
   publishCursor: (cursor: { messageId?: number; noticeId?: number }) => void;
   pushToast: (toast: Omit<Toast, 'id'>) => void;
   dismissToast: (id: string) => void;
-  setActiveConversationId: (id: number | null) => void;
+  /** `d:<userId>` for 1:1, `g:<groupId>` for groups — see lib/conversation. */
+  setActiveConversationId: (id: string | null) => void;
+  /** Switches the transport strategy (auto WS / forced polling). */
+  setTransportMode: (mode: TransportMode) => void;
+  /** Switches the transport host (SharedWorker / in-tab single-instance). */
+  setTransportHost: (host: TransportHost) => void;
 }
 
 export interface AppSession {
   user: User | null;
   isAuthenticated: boolean;
-  activeConversationId: number | null;
+  activeConversationId: string | null;
 }
 
 export interface AppRealtime {
@@ -70,6 +84,12 @@ export interface AppRealtime {
   transport: TransportKind;
   isLeader: boolean;
   isFrozen: boolean;
+  /** Device transport strategy: 'auto' (WS-first) or 'poll' (WS disabled). */
+  transportMode: TransportMode;
+  /** Device transport host preference: auto / shared-worker / in-tab. */
+  transportHost: TransportHost;
+  /** Latest ping round-trip time (ms); null until measured. */
+  latencyMs: number | null;
 }
 
 const ActionsContext = createContext<AppActions | null>(null);
@@ -124,7 +144,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<RealtimeStatus>(IDLE_STATUS);
   const [transport, setTransport] = useState<TransportKind>('shared-worker');
   const [isLeader, setIsLeader] = useState(true);
-  const [activeConversationId, setActiveConversationIdState] = useState<number | null>(null);
+  const [activeConversationId, setActiveConversationIdState] = useState<string | null>(null);
+  const [transportMode, setTransportModeState] = useState<TransportMode>(() => readStoredTransportMode());
+  const [transportHost, setTransportHostState] = useState<TransportHost>(() => readStoredTransportHost());
+  /** Latest ping round-trip time (ms); null until the first sample. */
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const realtimeRef = useRef<RealtimeClient | null>(null);
@@ -215,6 +239,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
     setActiveConversationIdState(null);
     setIsLeader(true);
+    setLatencyMs(null);
     realtimeRef.current?.disconnect();
   }, []);
 
@@ -251,8 +276,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return client.send(frame);
   }, []);
 
-  const setActiveConversationId = useCallback((id: number | null) => {
+  const setActiveConversationId = useCallback((id: string | null) => {
     setActiveConversationIdState(id);
+  }, []);
+
+  const setTransportMode = useCallback((mode: TransportMode) => {
+    writeStoredTransportMode(mode);
+    setTransportModeState(mode);
+    realtimeRef.current?.setTransportMode(mode);
+  }, []);
+
+  // Changing the host rebuilds the client (see the lifecycle effect below).
+  const setTransportHost = useCallback((host: TransportHost) => {
+    writeStoredTransportHost(host);
+    setTransportHostState(host);
   }, []);
 
   // -------------------------------------------------------------------------
@@ -306,10 +343,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         pushToast({ kind: 'warning', title: '登录状态已失效', body: reason || '请重新登录' });
       },
       onLeaderChange: (leader) => setIsLeader(leader),
-    });
+      onLatency: (rttMs) => setLatencyMs(rttMs > 0 ? rttMs : null),
+    }, transportHost);
 
     realtimeRef.current = client;
     client.start();
+    // Apply the persisted transport strategy before the first connect.
+    client.setTransportMode(readStoredTransportMode());
 
     // Re-attach an existing session (page reload / freshly opened tab).
     const token = session.getAccessToken();
@@ -319,7 +359,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       client.dispose();
       if (realtimeRef.current === client) realtimeRef.current = null;
     };
-  }, [dispatchFrame, dispatchNotice, pushToast, teardownLocalSession]);
+  }, [dispatchFrame, dispatchNotice, pushToast, teardownLocalSession, transportHost]);
 
   // -------------------------------------------------------------------------
   // Cross-tab logout + axios auth hooks
@@ -347,9 +387,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [teardownLocalSession, pushToast]);
 
   // -------------------------------------------------------------------------
-  // Proactive silent renewal (keeps the long connection's session alive)
+  // Cross-tab transport preference sync (changed in another tab)
   // -------------------------------------------------------------------------
   useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEYS.transportHost) {
+        const next: TransportHost =
+          event.newValue === 'shared-worker' || event.newValue === 'in-tab' ? event.newValue : 'auto';
+        // State change rebuilds the client on the new host (see lifecycle effect).
+        setTransportHostState(next);
+        return;
+      }
+      if (event.key !== STORAGE_KEYS.transport) return;
+      const mode: TransportMode = event.newValue === 'poll' ? 'poll' : 'auto';
+      setTransportModeState(mode);
+      realtimeRef.current?.setTransportMode(mode);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Proactive silent renewal (keeps the long connection's session alive)
+  // -------------------------------------------------------------------------
+  useEffect(() => {  
     if (!user) return undefined;
     const timer = window.setInterval(() => {
       if (!session.isAuthenticated() || !session.isAccessExpiring(60_000)) return;
@@ -376,6 +437,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       pushToast,
       dismissToast,
       setActiveConversationId,
+      setTransportMode,
+      setTransportHost,
     }),
     [
       signIn,
@@ -389,6 +452,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       pushToast,
       dismissToast,
       setActiveConversationId,
+      setTransportMode,
+      setTransportHost,
     ]
   );
 
@@ -400,8 +465,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const isFrozen = !!user && !isLeader;
 
   const realtimeValue = useMemo<AppRealtime>(
-    () => ({ status, transport, isLeader, isFrozen }),
-    [status, transport, isLeader, isFrozen]
+    () => ({ status, transport, isLeader, isFrozen, transportMode, transportHost, latencyMs }),
+    [status, transport, isLeader, isFrozen, transportMode, transportHost, latencyMs]
   );
 
   return (

@@ -46,7 +46,8 @@ router.get(
 );
 
 /**
- * POST /api/messages { toUserId, content, clientMsgId }
+ * POST /api/messages { toUserId, content, clientMsgId }  (1:1)
+ *                or  { groupId, content, clientMsgId, mentions }  (group)
  * HTTP send path, used when the WebSocket is unavailable. Persists and fans out
  * exactly like the WS `chat:send` handler (identical service call).
  */
@@ -57,8 +58,12 @@ router.post(
     const message = await messageService.send({
       fromUserId: req.userId,
       toUserId: body.toUserId,
+      groupId: body.groupId,
       content: body.content,
       clientMsgId: body.clientMsgId,
+      mentions: body.mentions,
+      type: body.type,
+      attachmentId: body.attachmentId,
     });
     res.status(201).json({ ok: true, data: { message } });
   })

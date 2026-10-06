@@ -18,7 +18,7 @@ const log = createLogger('ws');
  *   1. `Authorization: Bearer <token>` header  (non-browser clients)
  *   2. `?token=<token>` query parameter        (browser clients)
  */
-function extractToken(req, url) {
+function extractToken(req, url) { // 这是一个从WebSocket握手请求中提取访问令牌的函数。由于浏览器无法在WebSocket握手中设置自定义头，因此该函数按优先顺序接受令牌：
   const header = req.headers['authorization'];
   if (typeof header === 'string' && header.startsWith('Bearer ')) {
     return header.slice(7).trim();
@@ -28,7 +28,7 @@ function extractToken(req, url) {
 }
 
 /** Rejects a handshake *before* the protocol upgrade, with a real HTTP 401. */
-function rejectHandshake(socket, status, code, message) {
+function rejectHandshake(socket, status, code, message) {  //这是一个在协议升级之前拒绝握手的函数，返回一个真实的HTTP 401响应。它接收套接字、状态码、错误代码和错误消息作为参数，并将这些信息发送回客户端，然后关闭套接字连接。
   const body = JSON.stringify({ code, message });
   const reason = status === 401 ? 'Unauthorized' : 'Forbidden';
   socket.write(
@@ -42,7 +42,7 @@ function rejectHandshake(socket, status, code, message) {
   socket.destroy();
 }
 
-function attachWebSocket(httpServer) {
+function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附加到HTTP服务器的函数。它接收一个HTTP服务器实例作为参数，并在该服务器上创建一个WebSocket服务器。然后，它设置握手认证、连接处理、心跳检测和持续授权检查等功能，以确保WebSocket连接的安全性和稳定性。
   const wss = new WebSocketServer({ noServer: true, maxPayload: config.ws.maxPayloadBytes });
 
   // ---------------------------------------------------------------------------
@@ -140,11 +140,14 @@ function attachWebSocket(httpServer) {
             return handleAuthRefresh(ws, frame);
 
           case CLIENT.CHAT_SEND: {
-            const message = await messageService.send({
+            await messageService.send({
               fromUserId: ws.ctx.userId,
               toUserId: frame.toUserId,
+              groupId: frame.groupId,
               content: frame.content,
               clientMsgId: frame.clientMsgId,
+              mentions: frame.mentions,
+              attachmentId: frame.attachmentId,
             });
             return; // fan-out already happened inside the service
           }

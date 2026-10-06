@@ -21,9 +21,9 @@ const formatServerTime = (date = new Date()) => {
  */
 async function broadcastServerTimeNotice() {
   const now = new Date();
-  const content = `系统公告：当前服务端时间为 ${formatServerTime(now)}`;
-  const notice = await noticeRepo.insert({ content, level: 'info' });
-  const delivered = hub.broadcast({ type: SERVER.SYSTEM_NOTICE, notice });
+  const content = `系统公告：当前时间为 ${formatServerTime(now)}`;
+  const notice = await noticeRepo.insert({ content, level: 'info' });   // 这是一个插入公告的操作，将公告内容和级别存储到数据库中
+  const delivered = hub.broadcast({ type: SERVER.SYSTEM_NOTICE, notice });  // 这是一个广播消息，发送给所有连接的客户端
   log.info(`system notice #${notice.id} broadcast to ${delivered} connection(s)`);
   return { notice, delivered };
 }

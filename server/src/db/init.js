@@ -2,10 +2,41 @@
 
 const mysql = require('mysql2/promise');
 const config = require('../config');
-const { STATEMENTS } = require('./schema');
+const { STATEMENTS, MIGRATIONS, INDEX_MIGRATIONS } = require('./schema');
 const { createLogger } = require('../utils/logger');
 
 const log = createLogger('db');
+
+/**
+ * Adds a column only when it is actually missing.
+ * MySQL has no `ADD COLUMN IF NOT EXISTS`, so existence is checked against
+ * `information_schema` first — this keeps the boot path idempotent and lets a
+ * database created before group chat be upgraded in place.
+ */
+async function addColumnIfMissing(conn, { table, column, ddl }) {
+  const [rows] = await conn.query(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_schema = ? AND table_name = ? AND column_name = ? LIMIT 1`,
+    [config.db.database, table, column]
+  );
+  if (rows.length > 0) return false;
+  await conn.query(ddl);
+  log.info(`migrated: added ${table}.${column}`);
+  return true;
+}
+
+/** Same idea for secondary indexes. */
+async function addIndexIfMissing(conn, { table, index, ddl }) {
+  const [rows] = await conn.query(
+    `SELECT 1 FROM information_schema.statistics
+      WHERE table_schema = ? AND table_name = ? AND index_name = ? LIMIT 1`,
+    [config.db.database, table, index]
+  );
+  if (rows.length > 0) return false;
+  await conn.query(ddl);
+  log.info(`migrated: added index ${index} on ${table}`);
+  return true;
+}
 
 /**
  * Creates the database (if missing) and every table (if missing).
@@ -28,6 +59,12 @@ async function initDatabase({ silent = false } = {}) {
 
     for (const sql of STATEMENTS) {
       await conn.query(sql);
+    }
+    for (const migration of MIGRATIONS) {
+      await addColumnIfMissing(conn, migration);
+    }
+    for (const index of INDEX_MIGRATIONS) {
+      await addIndexIfMissing(conn, index);
     }
 
     if (!silent) {

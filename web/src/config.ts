@@ -26,6 +26,14 @@ export const STORAGE_KEYS = {
   bus: 'stella.im.bus',
   /** Device-local colour theme. */
   theme: 'stella.im.theme',
+  /** Device-local transport strategy: 'auto' (WS-first) or 'poll' (WS disabled). */
+  transport: 'stella.im.transport',
+  /** Device-local transport host: 'auto' | 'shared-worker' | 'in-tab'. */
+  transportHost: 'stella.im.transport-host',
+  /** Device-local sidebar width (px) set by the draggable splitter. */
+  sidebarWidth: 'stella.im.sidebar-w',
+  /** Device-local composer height (px) set by dragging its top edge. */
+  composerHeight: 'stella.im.composer-h',
 } as const;
 
 /** Enterprise request-governance tuning. */

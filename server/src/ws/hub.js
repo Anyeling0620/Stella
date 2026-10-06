@@ -10,7 +10,7 @@ const log = createLogger('ws:hub');
  * All outbound fan-out goes through here so the rest of the app never touches
  * a raw socket.
  */
-class Hub {
+class Hub {  // 这是一个WebSocket连接管理类，用于管理所有活跃的WebSocket连接，并提供向特定用户或所有用户发送消息的功能
   constructor() {
     /** @type {Map<number, Set<import('ws').WebSocket>>} */
     this.byUser = new Map();
@@ -18,9 +18,9 @@ class Hub {
     this.all = new Set();
   }
 
-  attach(ws, { userId, username, tokenExpAt, tokenVersion = 0 }) {
-    ws.ctx = {
-      id: crypto.randomUUID(),
+  attach(ws, { userId, username, tokenExpAt, tokenVersion = 0 }) { // 这是一个将WebSocket连接附加到Hub的方法，接收WebSocket对象和用户信息作为参数
+    ws.ctx = {  // 这是一个上下文对象，存储了连接的唯一ID、用户ID、用户名、令牌过期时间、令牌版本、连接状态和连接时间
+      id: crypto.randomUUID(), 
       userId: Number(userId),
       username,
       tokenExpAt,
@@ -29,7 +29,7 @@ class Hub {
       connectedAt: Date.now(),
     };
 
-    if (!this.byUser.has(ws.ctx.userId)) this.byUser.set(ws.ctx.userId, new Set());
+    if (!this.byUser.has(ws.ctx.userId)) this.byUser.set(ws.ctx.userId, new Set());  // 这是一个检查用户ID是否已经存在于byUser映射中的逻辑，如果不存在则创建一个新的Set来存储该用户的WebSocket连接
     this.byUser.get(ws.ctx.userId).add(ws);
     this.all.add(ws);
 
@@ -37,7 +37,7 @@ class Hub {
     return ws.ctx;
   }
 
-  detach(ws) {
+  detach(ws) {  //这是一个将WebSocket连接从Hub中分离的方法，用于在连接关闭时清理资源
     if (!ws.ctx) return;
     const set = this.byUser.get(ws.ctx.userId);
     if (set) {
@@ -76,7 +76,7 @@ class Hub {
   }
 
   /** Pushes an event to every socket of a user (all of their tabs). */
-  sendToUser(userId, payload) {
+  sendToUser(userId, payload) {  // 这是一个向特定用户的所有连接发送消息的方法
     let delivered = 0;
     for (const ws of this.connectionsOf(userId)) {
       if (this.send(ws, payload)) delivered += 1;
@@ -85,7 +85,7 @@ class Hub {
   }
 
   /** Global broadcast, used by the two-minute system notice. */
-  broadcast(payload) {
+  broadcast(payload) {  // 这是一个广播消息的方法，将消息发送给所有连接的客户端
     let delivered = 0;
     for (const ws of this.all) {
       if (this.send(ws, payload)) delivered += 1;
@@ -94,7 +94,7 @@ class Hub {
   }
 
   /** Force-closes every socket of a user (logout / token revocation). */
-  closeUser(userId, code = 4001, reason = 'session invalidated') {
+  closeUser(userId, code = 4001, reason = 'session invalidated') { // 这是一个关闭用户所有连接的方法，用于注销或令牌撤销
     for (const ws of [...this.connectionsOf(userId)]) {
       try {
         ws.close(code, reason);

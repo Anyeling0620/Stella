@@ -17,7 +17,7 @@ interface BusEnvelope {
   at: number;
 }
 
-class CrossTabBus {
+class CrossTabBus {  // 这是一个跨标签页消息总线类，用于在同一浏览器的不同标签页之间传递消息。它优先使用 `BroadcastChannel` API，如果不可用，则降级为使用 `StorageEvent` 机制。该类提供了消息发布和订阅功能，允许不同标签页之间进行通信，同时确保消息不会发送回发送者自身，从而实现一致的语义。
   readonly tabId = uid();
   readonly kind: 'broadcast-channel' | 'storage-event';
 

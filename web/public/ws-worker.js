@@ -82,6 +82,8 @@ function handleConnect(message) {
   if (message.wsUrl || message.pollUrl) {
     engine.configure({ wsUrl: message.wsUrl, pollUrl: message.pollUrl });
   }
+  // The tab pushes the device's transport preference (auto / forced polling).
+  if (message.transportMode) engine.setTransportMode(message.transportMode);
   if (!token) return;
 
   const snap = snapshot();
@@ -137,6 +139,10 @@ function handleMessage(port, message) {
 
     case 'connect':
       handleConnect(message);
+      return;
+
+    case 'set-transport':
+      engine.setTransportMode(message.mode);
       return;
 
     case 'disconnect':

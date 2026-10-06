@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { describeRealtime } from '../lib/format';
 import { useAppRealtime } from '../context/AppContext';
 
@@ -10,36 +11,55 @@ const STATE_TONE: Record<string, string> = {
   closed: 'bad',
 };
 
-/** Two characters is enough when something needs attention. */
-const STATE_SHORT: Record<string, string> = {
-  idle: '离线',
-  connecting: '连接中',
-  reconnecting: '重连',
-  polling: '轮询',
-  closed: '断开',
-};
-
 /**
- * Connection + window-role indicator, reduced to two marks.
+ * Bottom-left network status — a live read of *both* layers:
+ *   - the device link (`navigator.onLine` + online/offline events): 无网络;
+ *   - the realtime link (WS / polling / reconnecting) plus transport and RTT.
  *
- * Silence means healthy: a short label appears only when the link is not a
- * normal open socket. Everything technical (exact state, transport, retry
- * count) stays on `data-*` attributes and in the tooltip, which is what the
- * browser regression suite reads.
+ * The `data-*` attributes (`data-state`, `data-transport`, `data-network`, …)
+ * are what the browser regression suite reads; the label is for humans.
  */
 export function StatusPill() {
-  const { status, transport, isLeader } = useAppRealtime();
-  const tone = STATE_TONE[status.state] ?? 'idle';
+  const { status, transport, isLeader, transportMode, latencyMs } = useAppRealtime();
+  const [online, setOnline] = useState(() => (typeof navigator === 'undefined' ? true : navigator.onLine));
+
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener('online', up);
+    window.addEventListener('offline', down);
+    return () => {
+      window.removeEventListener('online', up);
+      window.removeEventListener('offline', down);
+    };
+  }, []);
+
+  const tone = !online ? 'bad' : STATE_TONE[status.state] ?? 'idle';
   const transportLabel = transport === 'shared-worker' ? 'SharedWorker 单连接' : '页内降级连接';
   const roleLabel = isLeader ? '活跃窗口' : '只读窗口';
   const stateLabel = describeRealtime(status.state, status.mode);
-  const retryLabel =
-    status.state === 'reconnecting' && status.attempt > 0
-      ? `重连 #${status.attempt}${status.nextRetryMs > 0 ? `（${Math.round(status.nextRetryMs / 1000)}s）` : ''}`
-      : '';
 
-  const healthy = status.state === 'open';
-  const short = STATE_SHORT[status.state] ?? '';
+  let label: string;
+  if (!online) label = '无网络';
+  else if (status.state === 'open') label = '已连接';
+  else if (status.state === 'polling') label = '轮询中';
+  else if (status.state === 'reconnecting') label = status.attempt > 0 ? `重连中 #${status.attempt}` : '重连中';
+  else if (status.state === 'connecting') label = '连接中';
+  else if (status.state === 'idle') label = '未连接';
+  else label = '已断开';
+
+  const latency = online && status.state === 'open' && latencyMs != null ? `${latencyMs}ms` : '';
+
+  const title = [
+    online ? '网络：在线' : '网络：离线',
+    stateLabel,
+    transportMode === 'poll' ? '连接策略：仅轮询' : '连接策略：自动',
+    `传输：${transportLabel}`,
+    roleLabel,
+    latency ? `延迟 ${latency}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   return (
     <div
@@ -48,20 +68,24 @@ export function StatusPill() {
       data-state={status.state}
       data-mode={status.mode}
       data-transport={transport}
-      title={[stateLabel, transportLabel, roleLabel, retryLabel].filter(Boolean).join(' · ')}
+      data-network={online ? 'online' : 'offline'}
+      title={title}
     >
-      <span className={`dot ${tone}`} data-testid="status-dot" data-state={status.state} />
       <span
-        className={`role-marker ${isLeader ? 'leader' : 'follower'}`}
+        className={`dot ${tone}`}
+        data-testid="status-dot"
+        data-state={status.state}
+        data-network={online ? 'online' : 'offline'}
+      />
+      <span
         data-testid="status-role"
         data-role={isLeader ? 'leader' : 'follower'}
         aria-label={roleLabel}
       />
-      {!healthy && short && (
-        <span className="status-warn" data-testid="status-warn">
-          {short}
-        </span>
-      )}
+      <span className="status-text" data-testid="status-text" data-tone={tone}>
+        {label}
+        {latency && <span className="status-latency">{latency}</span>}
+      </span>
     </div>
   );
 }

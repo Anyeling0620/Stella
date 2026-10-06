@@ -3,7 +3,7 @@ import { authApi } from '../lib/api';
 import { ApiError } from '../lib/axiosClient';
 import { AVATAR_PRESET_IDS } from '../lib/avatarPresets';
 import { THEME_IDS, THEME_LABELS, applyTheme, readStoredTheme, type ThemeId } from '../lib/theme';
-import { useAppActions, useAppSession } from '../context/AppContext';
+import { useAppActions, useAppRealtime, useAppSession } from '../context/AppContext';
 import { Avatar } from './Avatar';
 
 interface ProfileDialogProps {
@@ -20,7 +20,8 @@ interface ProfileDialogProps {
  */
 export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
   const { user } = useAppSession();
-  const { updateUser, pushToast } = useAppActions();
+  const { transportMode, transportHost, transport } = useAppRealtime();
+  const { updateUser, pushToast, setTransportMode, setTransportHost } = useAppActions();
   const [nickname, setNickname] = useState('');
   const [avatar, setAvatar] = useState<string | null>(null);
   const [theme, setTheme] = useState<ThemeId>(() => readStoredTheme());
@@ -153,6 +154,60 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="field">
+            <span>传输模式</span>
+            <div className="segmented" role="radiogroup" aria-label="传输模式">
+              <button
+                type="button"
+                className={transport === 'shared-worker' ? 'active' : ''}
+                data-testid="host-shared-worker"
+                aria-checked={transportHost === 'shared-worker'}
+                onClick={() => setTransportHost('shared-worker')}
+              >
+                SharedWorker 单连接
+              </button>
+              <button
+                type="button"
+                className={transport === 'in-tab-fallback' ? 'active' : ''}
+                data-testid="host-in-tab"
+                aria-checked={transportHost === 'in-tab'}
+                onClick={() => setTransportHost('in-tab')}
+              >
+                页内单例抢占
+              </button>
+            </div>
+            <p className="field-hint">
+              SharedWorker：整个浏览器共享一条长连接（默认，自动检测）。页内单例抢占：不依赖 Worker，由最新打开的窗口独占连接并转发给其它窗口。切换会重建连接。
+            </p>
+          </div>
+
+          <div className="field">
+            <span>连接策略</span>
+            <div className="segmented" role="radiogroup" aria-label="连接策略">
+              <button
+                type="button"
+                className={transportMode === 'auto' ? 'active' : ''}
+                data-testid="transport-auto"
+                aria-checked={transportMode === 'auto'}
+                onClick={() => setTransportMode('auto')}
+              >
+                自动（WebSocket 优先）
+              </button>
+              <button
+                type="button"
+                className={transportMode === 'poll' ? 'active' : ''}
+                data-testid="transport-poll"
+                aria-checked={transportMode === 'poll'}
+                onClick={() => setTransportMode('poll')}
+              >
+                仅轮询（关闭 WS）
+              </button>
+            </div>
+            <p className="field-hint">
+              仅轮询会停用 WebSocket，改用 HTTP 增量轮询（用于验证断线降级链路）。改后立即生效，无需保存。
+            </p>
           </div>
         </div>
 
