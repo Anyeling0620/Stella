@@ -366,7 +366,7 @@ textarea {
   /* `--sidebar-w` is written directly by the splitter drag (no React state);
      `--sidebar-default` is the per-breakpoint fallback the drag never sets, so
      the splitter keeps working on tablet widths instead of being overruled. */
-  grid-template-columns: var(--sidebar-w, var(--sidebar-default, 392px)) 5px 1fr;
+  grid-template-columns: var(--sidebar-w, var(--sidebar-default, 392px)) 2px 1fr;
   height: 100%;
   min-height: 0;
 }
@@ -494,6 +494,7 @@ textarea {
 
 /* Draggable divider between the sidebar and the conversation pane. */
 .splitter {
+  width: 2px;
   background: var(--border);
   cursor: col-resize;
   touch-action: none;
@@ -916,7 +917,7 @@ textarea {
   gap: 12px;
   height: 56px;
   flex: 0 0 auto;
-  padding: 0 16px;
+  padding: 28px 16px;
   background: var(--surface);
   border-bottom: var(--border-w) solid var(--border);
 }
@@ -1113,7 +1114,6 @@ textarea {
   gap: 10px;
   padding: 12px 18px calc(12px + env(safe-area-inset-bottom));
   background: var(--bg-input, var(--surface));
-  border-top: 1px solid var(--divider, var(--border));
 }
 
 .chat-composer textarea {
@@ -2076,7 +2076,7 @@ textarea {
    lights up on hover as the grab affordance. */
 .composer-resizer {
   flex: 0 0 auto;
-  height: 4px;
+  height: 2px;
   background: var(--border);
   cursor: row-resize;
   touch-action: none;
