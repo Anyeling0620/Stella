@@ -149,9 +149,9 @@ async function main() {
   await sleep(300);
   await shot(desktop, '04-friends-remove-confirm');
 
-  // Theme picker + two alternate palettes.
-  await desktop.evaluate(() => document.querySelector('[data-testid="profile-open"]')?.click());
-  await desktop.waitForSelector('[data-testid="profile-dialog"]', { timeout: 8000 });
+  // Settings dialog (theme picker) + two alternate palettes.
+  await desktop.evaluate(() => document.querySelector('[data-testid="settings-open"]')?.click());
+  await desktop.waitForSelector('[data-testid="settings-dialog"]', { timeout: 8000 });
   await sleep(400);
   await shot(desktop, '10-theme-picker');
   for (const theme of ['paper', 'cyan', 'magenta']) {
@@ -159,19 +159,26 @@ async function main() {
       document.querySelector(`[data-testid="theme-option"][data-theme-id="${id}"]`)?.click();
     }, theme);
     await sleep(400);
-    await desktop.evaluate(() => document.querySelector('[data-testid="profile-cancel"]')?.click());
+    await desktop.evaluate(() => document.querySelector('[data-testid="settings-close"]')?.click());
     await sleep(300);
     await shot(desktop, `11-theme-${theme}`);
-    await desktop.evaluate(() => document.querySelector('[data-testid="profile-open"]')?.click());
-    await desktop.waitForSelector('[data-testid="profile-dialog"]', { timeout: 8000 });
+    await desktop.evaluate(() => document.querySelector('[data-testid="settings-open"]')?.click());
+    await desktop.waitForSelector('[data-testid="settings-dialog"]', { timeout: 8000 });
     await sleep(200);
   }
   await desktop.evaluate(() => {
-    document.querySelector('[data-testid="profile-cancel"]')?.click();
-    window.localStorage.setItem('stella.im.theme', 'acid');
-    document.documentElement.setAttribute('data-theme', 'acid');
+    document.querySelector('[data-testid="settings-close"]')?.click();
+    window.localStorage.setItem('stella.im.theme', 'wechat');
+    document.documentElement.setAttribute('data-theme', 'wechat');
   });
   await sleep(300);
+
+  // Contacts (通讯录): shortcut rows + letter-grouped list + alphabet index.
+  await desktop.evaluate(() => document.querySelector('[data-testid="tab-chats"]')?.click());
+  await sleep(300);
+  await desktop.evaluate(() => document.querySelector('[data-testid="tab-friends"]')?.click());
+  await sleep(500);
+  await shot(desktop, '12-contacts-desktop');
 
   console.log('tablet 768x900');
   const tablet = await newPage(browser, 768, 900, alice);

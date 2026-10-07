@@ -7,18 +7,72 @@ import { convKey, parseConversationKey } from '../lib/conversation';
 import { formatListTime } from '../lib/format';
 import { useAppActions, useAppRealtime, useAppSession } from '../context/AppContext';
 import { Avatar } from '../components/Avatar';
+import { PresenceAvatar } from '../components/PresenceAvatar';
 import { StatusPill } from '../components/StatusPill';
 import { ProfileDialog } from '../components/ProfileDialog';
+import { SettingsDialog } from '../components/SettingsDialog';
 import { CreateGroupDialog } from '../components/CreateGroupDialog';
 import { GroupsPanel } from '../components/GroupsPanel';
+import { RailNav, type ShellView } from '../components/RailNav';
 import { ChatWindow } from './ChatWindow';
 import { FriendsPanel } from './FriendsPanel';
+import { applyTheme, THEME_PAIRS, type ThemeId } from '../lib/theme';
 import type { ChatMessage, ConversationPreview, FriendRequest, Group, GroupJoinRequest, GroupMember, SystemNotice, User } from '../types';
 
 const byNickname = (a: User, b: User) => a.nickname.localeCompare(b.nickname, 'zh-CN');
 
 const groupActivity = (group: Group) =>
   group.lastMessage?.createdAt ?? group.updatedAt ?? '';
+
+/** List-pane heading per rail destination. */
+const VIEW_TITLES: Record<ShellView, string> = {
+  chats: '消息',
+  friends: '通讯录',
+  groups: '群聊',
+  favorites: '收藏',
+  moments: '朋友圈',
+};
+
+/** Centred empty state for destinations that have no backend yet. */
+function PlaceholderView({ art, title, sub }: { art: string; title: string; sub: string }) {
+  return (
+    <div className="placeholder-view">
+      <div className="placeholder-art" aria-hidden="true">
+        {art}
+      </div>
+      <p className="placeholder-title">{title}</p>
+      <p className="placeholder-sub">{sub}</p>
+    </div>
+  );
+}
+
+/**
+ * Splitter drag limits. These MIRROR the `.main` min-width tiers in styles.css
+ * (`360px` from 768px, `480px` from 1024px) so the drag limit can never squeeze
+ * the content pane below the floor the layout itself enforces.
+ */
+const SPLITTER_W = 5;
+const SIDEBAR_MIN_W = 300;
+const SIDEBAR_MAX_W = 560;
+const CONTENT_MIN_WIDE = 480;
+const CONTENT_MIN_NARROW = 360;
+
+function sidebarWidthBounds(): { min: number; max: number } {
+  const contentMin = window.innerWidth >= 1024 ? CONTENT_MIN_WIDE : CONTENT_MIN_NARROW;
+  const max = Math.max(
+    SIDEBAR_MIN_W,
+    Math.min(SIDEBAR_MAX_W, window.innerWidth - contentMin - SPLITTER_W)
+  );
+  return { min: SIDEBAR_MIN_W, max };
+}
+
+/** Clamps a `NNNpx` string to the current viewport's bounds. */
+function clampSidebarWidth(value: string): string | null {
+  const match = /^(\d+)px$/.exec(value.trim());
+  if (!match) return null;
+  const { min, max } = sidebarWidthBounds();
+  return `${Math.round(Math.min(Math.max(Number(match[1]), min), max))}px`;
+}
 
 /**
  * Authenticated application shell.
@@ -47,16 +101,23 @@ export function ChatShell() {
   const [requests, setRequests] = useState<FriendRequest[]>([]);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const [mentioned, setMentioned] = useState<Record<string, boolean>>({});
+  /** userId -> online. Seeded from payloads, kept live by `presence` frames. */
+  const [presence, setPresence] = useState<Record<number, boolean>>({});
   /**
    * Live "last message" per conversation key, updated from every
    * `chat:message` frame (incoming AND my own echo) so the list preview stays
    * current without a refetch. Seeded once from the friend/group list.
    */
   const [lastMessages, setLastMessages] = useState<Record<string, ConversationPreview>>({});
-  const [view, setView] = useState<'chats' | 'friends' | 'groups'>('chats');
+  const [view, setView] = useState<ShellView>('chats');
   const [latestNotice, setLatestNotice] = useState<SystemNotice | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  /** Mirrors `html[data-theme]` so the rail's day/night icon tracks the picker. */
+  const [isDark, setIsDark] = useState(
+    () => document.documentElement.getAttribute('data-theme') === 'wechat-dark'
+  );
 
   // Refs let the frame handler read fresh values without re-subscribing.
   // Written in effects rather than during render (render-phase ref writes break
@@ -101,8 +162,8 @@ export function ChatShell() {
     const shell = shellRef.current;
     if (!shell) return;
     const dx = event.clientX - dragRef.current.startX;
-    const max = Math.min(window.innerWidth * 0.6, 560);
-    const width = Math.round(Math.min(Math.max(dragRef.current.startWidth + dx, 220), max));
+    const { min, max } = sidebarWidthBounds();
+    const width = Math.round(Math.min(Math.max(dragRef.current.startWidth + dx, min), max));
     shell.style.setProperty('--sidebar-w', `${width}px`);
   }, []);
 
@@ -125,21 +186,62 @@ export function ChatShell() {
     }
   }, []);
 
-  // Restore a previously saved width before paint (no state, no re-render).
+  // Restore a previously saved width before paint (no state, no re-render),
+  // clamped to the current viewport so a wide value saved on a big screen can't
+  // squeeze the content on a smaller one.
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell) return;
     try {
       const saved = window.localStorage.getItem(STORAGE_KEYS.sidebarWidth);
-      if (saved && /^\d+px$/.test(saved)) shell.style.setProperty('--sidebar-w', saved);
+      const clamped = saved ? clampSidebarWidth(saved) : null;
+      if (clamped) shell.style.setProperty('--sidebar-w', clamped);
     } catch {
       /* ignore */
     }
   }, []);
 
+  // Shrinking the window must re-clamp a floating (dragged) width, otherwise the
+  // content floor would force a horizontal overflow instead of the list narrowing.
+  useEffect(() => {
+    const onResize = () => {
+      const shell = shellRef.current;
+      if (!shell) return;
+      const current = shell.style.getPropertyValue('--sidebar-w');
+      const clamped = clampSidebarWidth(current);
+      if (clamped && clamped !== current.trim()) shell.style.setProperty('--sidebar-w', clamped);
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   useEffect(() => {
     if (!isAuthenticated) navigate('/login', { replace: true });
   }, [isAuthenticated, navigate]);
+
+  // You are online by definition while the app is open, but the server never
+  // sends you your own presence frame — so seed it, otherwise "N 人在线" would
+  // never count yourself.
+  useEffect(() => {
+    if (!user) return;
+    setPresence((previous) => (previous[user.id] ? previous : { ...previous, [user.id]: true }));
+  }, [user]);
+
+  // Keep the rail's theme icon in sync with any theme change (rail toggle or
+  // the profile dialog's picker), without lifting theme state into the context.
+  useEffect(() => {
+    const sync = () =>
+      setIsDark(document.documentElement.getAttribute('data-theme') === 'wechat-dark');
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => observer.disconnect();
+  }, []);
+
+  const toggleTheme = useCallback(() => {
+    const current = (document.documentElement.getAttribute('data-theme') ?? '') as ThemeId;
+    // Flip within the active theme family; unknown themes fall back to WeChat.
+    applyTheme(THEME_PAIRS[current] ?? 'wechat-dark');
+  }, []);
 
   /**
    * Seeds previews for conversations we don't yet know about. Never overwrites
@@ -181,6 +283,11 @@ export function ChatShell() {
     try {
       const data = await friendApi.list();
       setFriends(data.friends);
+      setPresence((previous) => {
+        const next = { ...previous };
+        for (const friend of data.friends) next[friend.id] = Boolean(friend.online);
+        return next;
+      });
       seedPreviews(
         data.friends
           .filter((friend) => friend.lastMessage)
@@ -262,6 +369,7 @@ export function ChatShell() {
       setRequests([]);
       setUnread({});
       setMentioned({});
+      setPresence({});
       setLastMessages({});
       setLatestNotice(null);
       setProfileOpen(false);
@@ -345,6 +453,15 @@ export function ChatShell() {
       // A one-way removal emits this to MY tabs only.
       if (frame.type === 'friend:removed') {
         dropFriendLocally(Number(frame.friendId));
+        return;
+      }
+
+      // Presence for a friend or a group co-member.
+      if (frame.type === 'presence') {
+        const userId = Number(frame.userId);
+        if (!Number.isInteger(userId)) return;
+        const online = Boolean(frame.online);
+        setPresence((previous) => (previous[userId] === online ? previous : { ...previous, [userId]: online }));
         return;
       }
 
@@ -580,182 +697,183 @@ export function ChatShell() {
     () => requests.reduce((count, request) => (request.direction === 'incoming' ? count + 1 : count), 0),
     [requests]
   );
+  const unreadTotal = useMemo(
+    () => Object.values(unread).reduce((sum, count) => sum + count, 0),
+    [unread]
+  );
+  const groupMention = useMemo(
+    () => groups.some((group) => mentioned[convKey.group(group.id)]),
+    [groups, mentioned]
+  );
 
   if (!user) return null;
 
   return (
     <div className={`shell ${activeConversationId ? 'conv-open' : ''}`} data-testid="shell" ref={shellRef}>
-      <aside className="sidebar">
-        <header className="sidebar-header">
-          <button
-            type="button"
-            className="me"
-            data-testid="profile-open"
-            onClick={() => setProfileOpen(true)}
-            title="设置资料"
-          >
-            <Avatar name={user.nickname} avatar={user.avatar} size={42} />
-            <span className="me-info">
-              <span className="me-name">{user.nickname}</span>
-              <span className="me-sub">@{user.username}</span>
-            </span>
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            data-testid="signout"
-            onClick={() => void handleSignOut()}
-          >
-            退出
-          </button>
-        </header>
+      {/* Rail + list share the first grid column, so the splitter drag (which
+          resizes `--sidebar-w`) grows `shell.firstElementChild` — the e2e contract. */}
+      <div className="shell-left">
+        <RailNav
+          user={user}
+          view={view}
+          unreadTotal={unreadTotal}
+          friendBadge={incomingCount}
+          groupMention={groupMention}
+          frozen={isFrozen}
+          isDark={isDark}
+          onSelect={setView}
+          onProfile={() => setProfileOpen(true)}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onToggleTheme={toggleTheme}
+        />
 
-        <div className="sidebar-tabs">
-          <button
-            type="button"
-            className={view === 'chats' ? 'active' : ''}
-            data-testid="tab-chats"
-            onClick={() => setView('chats')}
-          >
-            会话
-          </button>
-          <button
-            type="button"
-            className={view === 'friends' ? 'active' : ''}
-            data-testid="tab-friends"
-            onClick={() => setView('friends')}
-          >
-            好友
-            {incomingCount > 0 && <span className="badge badge-unread">{incomingCount}</span>}
-          </button>
-          <button
-            type="button"
-            className={view === 'groups' ? 'active' : ''}
-            data-testid="tab-groups"
-            onClick={() => setView('groups')}
-          >
-            群聊
-            {groups.some((group) => mentioned[convKey.group(group.id)]) && (
-              <span className="badge badge-mention">@</span>
-            )}
-          </button>
-          <button
-            type="button"
-            className="sidebar-new-group"
-            data-testid="create-group-open"
-            title="发起群聊"
-            aria-label="发起群聊"
-            onClick={() => setCreateGroupOpen(true)}
-          >
-            ＋
-          </button>
-        </div>
-
-        <div className="sidebar-body">
-          {view === 'friends' ? (
-            <FriendsPanel
-              friends={friends}
-              requests={requests}
-              unread={unread}
-              onRespond={respond}
-              onOpenConversation={(friendId) => openConversation(convKey.direct(friendId))}
-              onRemove={removeFriend}
-              frozen={isFrozen}
-            />
-          ) : view === 'groups' ? (
-            <GroupsPanel
-              groups={sortedGroups}
-              unread={unread}
-              mentioned={mentioned}
-              onOpenConversation={openConversation}
-              onCreateGroup={() => setCreateGroupOpen(true)}
-              frozen={isFrozen}
-            />
-          ) : (
-            <div className="conversation-list">
-              {sortedFriends.map((friend) => {
-                const key = convKey.direct(friend.id);
-                const preview = lastMessages[key];
-                const unreadCount = unread[key] ?? 0;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`conversation-item ${activeConversationId === key ? 'active' : ''}`}
-                    data-testid="conversation-item"
-                    data-friend-id={friend.id}
-                    onClick={() => openConversation(key)}
-                    disabled={isFrozen}
-                  >
-                    <Avatar name={friend.nickname} avatar={friend.avatar} size={40} />
-                    <span className="conversation-body">
-                      <span className="conversation-top">
-                        <span className="conversation-name">{friend.nickname}</span>
-                        <span className="conversation-time">{formatListTime(preview?.createdAt)}</span>
-                      </span>
-                      <span className="conversation-bottom">
-                        <span className="conversation-sub">{preview ? preview.content : ''}</span>
-                        {unreadCount > 0 && <span className="badge badge-unread">{unreadCount}</span>}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-
-              {sortedGroups.map((group) => {
-                const key = convKey.group(group.id);
-                const preview = lastMessages[key];
-                const previewText = preview
-                  ? preview.type === 'system'
-                    ? preview.content
-                    : `${preview.fromNickname ? `${preview.fromNickname}: ` : ''}${preview.content}`
-                  : null;
-                const unreadCount = unread[key] ?? 0;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`conversation-item conversation-group ${activeConversationId === key ? 'active' : ''}`}
-                    data-testid="group-item"
-                    data-group-id={group.id}
-                    onClick={() => openConversation(key)}
-                    disabled={isFrozen}
-                  >
-                    <Avatar name={group.name} avatar={group.avatar} size={40} />
-                    <span className="conversation-body">
-                      <span className="conversation-top">
-                        <span className="conversation-name">{group.name}</span>
-                        <span className="conversation-time">{formatListTime(preview?.createdAt)}</span>
-                      </span>
-                      <span className="conversation-bottom">
-                        <span className="conversation-sub">{previewText ?? `${group.memberCount ?? 0} 位成员`}</span>
-                        {mentioned[key] ? (
-                          <span className="badge badge-mention">@</span>
-                        ) : unreadCount > 0 ? (
-                          <span className="badge badge-unread">{unreadCount}</span>
-                        ) : null}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-
-              {sortedFriends.length === 0 && sortedGroups.length === 0 && (
-                <div className="panel-empty">还没有会话，去「好友」里加人或发起群聊</div>
+        <aside className="sidebar">
+          <header className="sidebar-header">
+            <span className="sidebar-title">{VIEW_TITLES[view]}</span>
+            <div className="sidebar-header-actions">
+              {/* Only the conversation list offers "start a chat" here; the group
+                  view has its own button and the placeholder views have none. */}
+              {view === 'chats' && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  data-testid="create-group-open"
+                  title="发起群聊"
+                  aria-label="发起群聊"
+                  disabled={isFrozen}
+                  onClick={() => setCreateGroupOpen(true)}
+                >
+                  ＋
+                </button>
               )}
             </div>
-          )}
-        </div>
+          </header>
 
-        <footer className="sidebar-footer">
-          <StatusPill />
-          {latestNotice && (
-            <div className="notice-line" data-testid="notice-line">
-              {latestNotice.content}
-            </div>
-          )}
-        </footer>
-      </aside>
+          {/* Contacts own their own scroller (fixed search + index bar), so the
+              sidebar body must not also scroll — that would double the gutter. */}
+          <div className={`sidebar-body ${view === 'friends' ? 'no-scroll' : ''}`}>
+            {view === 'friends' ? (
+              <FriendsPanel
+                friends={friends}
+                requests={requests}
+                unread={unread}
+                presence={presence}
+                onRespond={respond}
+                onOpenConversation={(friendId) => openConversation(convKey.direct(friendId))}
+                onOpenGroups={() => setView('groups')}
+                onRemove={removeFriend}
+                frozen={isFrozen}
+              />
+            ) : view === 'groups' ? (
+              <GroupsPanel
+                groups={sortedGroups}
+                unread={unread}
+                mentioned={mentioned}
+                onOpenConversation={openConversation}
+                onCreateGroup={() => setCreateGroupOpen(true)}
+                frozen={isFrozen}
+              />
+            ) : view === 'favorites' ? (
+              <PlaceholderView art="☆" title="还没有收藏" sub="收藏功能开发中" />
+            ) : view === 'moments' ? (
+              <PlaceholderView art="◍" title="朋友圈" sub="功能开发中" />
+            ) : (
+              <div className="conversation-list">
+                {sortedFriends.map((friend) => {
+                  const key = convKey.direct(friend.id);
+                  const preview = lastMessages[key];
+                  const unreadCount = unread[key] ?? 0;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`conversation-item ${activeConversationId === key ? 'active' : ''}`}
+                      data-testid="conversation-item"
+                      data-friend-id={friend.id}
+                      onClick={() => openConversation(key)}
+                      disabled={isFrozen}
+                    >
+                      <PresenceAvatar
+                        name={friend.nickname}
+                        avatar={friend.avatar}
+                        size={40}
+                        online={presence[friend.id] ?? Boolean(friend.online)}
+                      />
+                      <span className="conversation-body">
+                        <span className="conversation-top">
+                          <span className="conversation-name">{friend.nickname}</span>
+                          <span className="conversation-time">{formatListTime(preview?.createdAt)}</span>
+                        </span>
+                        <span className="conversation-bottom">
+                          <span className="conversation-sub">{preview ? preview.content : ''}</span>
+                          {unreadCount > 0 && (
+                            <span className="badge badge-unread">
+                              {unreadCount > 99 ? '99+' : unreadCount}
+                            </span>
+                          )}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+
+                {sortedGroups.map((group) => {
+                  const key = convKey.group(group.id);
+                  const preview = lastMessages[key];
+                  const previewText = preview
+                    ? preview.type === 'system'
+                      ? preview.content
+                      : `${preview.fromNickname ? `${preview.fromNickname}: ` : ''}${preview.content}`
+                    : null;
+                  const unreadCount = unread[key] ?? 0;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`conversation-item conversation-group ${activeConversationId === key ? 'active' : ''}`}
+                      data-testid="group-item"
+                      data-group-id={group.id}
+                      onClick={() => openConversation(key)}
+                      disabled={isFrozen}
+                    >
+                      <Avatar name={group.name} avatar={group.avatar} size={40} />
+                      <span className="conversation-body">
+                        <span className="conversation-top">
+                          <span className="conversation-name">{group.name}</span>
+                          <span className="conversation-time">{formatListTime(preview?.createdAt)}</span>
+                        </span>
+                        <span className="conversation-bottom">
+                          <span className="conversation-sub">{previewText ?? `${group.memberCount ?? 0} 位成员`}</span>
+                          {mentioned[key] ? (
+                            <span className="badge badge-mention">@</span>
+                          ) : unreadCount > 0 ? (
+                            <span className="badge badge-unread">
+                              {unreadCount > 99 ? '99+' : unreadCount}
+                            </span>
+                          ) : null}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+
+                {sortedFriends.length === 0 && sortedGroups.length === 0 && (
+                  <div className="panel-empty">还没有会话，去「通讯录」里加人或发起群聊</div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <footer className="sidebar-footer">
+            <StatusPill />
+            {latestNotice && (
+              <div className="notice-line" data-testid="notice-line">
+                {latestNotice.content}
+              </div>
+            )}
+          </footer>
+        </aside>
+      </div>
 
       {/* Drag to resize the sidebar. Pointer events write `--sidebar-w` directly
           (no state), so dragging never re-renders the app. Hidden on phones. */}
@@ -780,6 +898,7 @@ export function ChatShell() {
             frozen={isFrozen}
             peerHint={activePeer}
             groupHint={activeGroup}
+            presence={presence}
             onBack={handleBack}
           />
         ) : (
@@ -790,6 +909,11 @@ export function ChatShell() {
       </main>
 
       <ProfileDialog open={profileOpen} onClose={() => setProfileOpen(false)} />
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSignOut={handleSignOut}
+      />
       <CreateGroupDialog
         open={createGroupOpen}
         friends={sortedFriends}

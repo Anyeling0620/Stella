@@ -7,6 +7,7 @@ const { CLIENT, SERVER, CLOSE } = require('./protocol');
 const jwtUtil = require('../utils/jwt');
 const userRepo = require('../repositories/userRepo');
 const messageService = require('../services/messageService');
+const presenceService = require('../services/presenceService');
 const { createLogger } = require('../utils/logger');
 
 const log = createLogger('ws');
@@ -118,58 +119,87 @@ function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附�
       serverTime: new Date().toISOString(),
     });
 
+    // Going from zero to one socket = the user appeared online. Extra tabs of an
+    // already-online user must not re-announce.
+    if (hub.connectionsOf(ws.ctx.userId).size === 1) {
+      void presenceService.announce(ws.ctx.userId, true);
+    }
+
     ws.on('pong', () => {
       ws.ctx.isAlive = true;
     });
 
     ws.on('message', async (raw) => {
-      let frame;
-      try {
-        frame = JSON.parse(raw.toString());
-      } catch {
-        return hub.send(ws, { type: SERVER.CHAT_ERROR, code: 'BAD_FRAME', message: '消息格式非法' });
+      // Bound concurrent work per connection. A client that sends faster than the
+      // DB can drain its requests would otherwise queue unbounded async work (and
+      // DB queries) in memory; excess frames are rejected, never buffered.
+      if (ws.ctx.inflight >= config.ws.maxInflightFrames) {
+        return hub.send(ws, { type: SERVER.CHAT_ERROR, code: 'TOO_MANY_REQUESTS', message: '操作过于频繁，请稍后再试' });
       }
-      if (!frame || typeof frame.type !== 'string') return;
+      ws.ctx.inflight += 1;
 
       try {
-        switch (frame.type) {
-          case CLIENT.PING:
-            return hub.send(ws, { type: SERVER.PONG, serverTime: new Date().toISOString() });
-
-          case CLIENT.AUTH_REFRESH:
-            return handleAuthRefresh(ws, frame);
-
-          case CLIENT.CHAT_SEND: {
-            await messageService.send({
-              fromUserId: ws.ctx.userId,
-              toUserId: frame.toUserId,
-              groupId: frame.groupId,
-              content: frame.content,
-              clientMsgId: frame.clientMsgId,
-              mentions: frame.mentions,
-              attachmentId: frame.attachmentId,
-            });
-            return; // fan-out already happened inside the service
-          }
-
-          case CLIENT.MESSAGE_READ:
-            await messageService.markRead({ userId: ws.ctx.userId, ids: frame.ids });
-            return;
-
-          default:
-            return hub.send(ws, { type: SERVER.CHAT_ERROR, code: 'UNKNOWN_TYPE', message: `未知的操作: ${frame.type}` });
+        let frame;
+        try {
+          frame = JSON.parse(raw.toString());
+        } catch {
+          hub.send(ws, { type: SERVER.CHAT_ERROR, code: 'BAD_FRAME', message: '消息格式非法' });
+          return;
         }
-      } catch (err) {
-        const code = err.code || 'INTERNAL';
-        const message = err.expose ? err.message : '服务器处理失败';
-        log.warn(`frame ${frame.type} failed: ${message}`);
-        hub.send(ws, { type: SERVER.CHAT_ERROR, clientMsgId: frame.clientMsgId || null, code, message });
+        if (!frame || typeof frame.type !== 'string') return;
+
+        try {
+          switch (frame.type) {
+            case CLIENT.PING:
+              return hub.send(ws, { type: SERVER.PONG, serverTime: new Date().toISOString() });
+
+            case CLIENT.AUTH_REFRESH:
+              return await handleAuthRefresh(ws, frame);
+
+            case CLIENT.CHAT_SEND: {
+              await messageService.send({
+                fromUserId: ws.ctx.userId,
+                toUserId: frame.toUserId,
+                groupId: frame.groupId,
+                content: frame.content,
+                clientMsgId: frame.clientMsgId,
+                mentions: frame.mentions,
+                attachmentId: frame.attachmentId,
+              });
+              return; // fan-out already happened inside the service
+            }
+
+            case CLIENT.MESSAGE_READ:
+              await messageService.markRead({ userId: ws.ctx.userId, ids: frame.ids });
+              return;
+
+            default:
+              return hub.send(ws, { type: SERVER.CHAT_ERROR, code: 'UNKNOWN_TYPE', message: `未知的操作: ${frame.type}` });
+          }
+        } catch (err) {
+          const code = err.code || 'INTERNAL';
+          const message = err.expose ? err.message : '服务器处理失败';
+          log.warn(`frame ${frame.type} failed: ${message}`);
+          hub.send(ws, { type: SERVER.CHAT_ERROR, clientMsgId: frame.clientMsgId || null, code, message });
+        }
+      } finally {
+        ws.ctx.inflight -= 1;
       }
     });
 
     ws.on('close', (code) => {
+      const userId = ws.ctx ? ws.ctx.userId : null;
       hub.detach(ws);
       log.debug(`conn closed code=${code}`);
+
+      // Last socket gone = the user is offline. Stamp `last_seen_at` so peers can
+      // show "最后活跃 …", then tell everyone who displays their status.
+      if (userId && hub.connectionsOf(userId).size === 0) {
+        userRepo
+          .touchLastSeen(userId)
+          .catch(() => {})
+          .finally(() => void presenceService.announce(userId, false));
+      }
     });
 
     ws.on('error', (err) => {
@@ -183,6 +213,13 @@ function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附�
   const heartbeat = setInterval(() => {
     for (const ws of hub.all) {
       if (ws.ctx.isAlive === false) {
+        ws.terminate();
+        continue;
+      }
+      // A socket whose send buffer never drains is a stalled consumer. Close it
+      // instead of letting `ws` buffer an unbounded backlog.
+      if (ws.bufferedAmount > config.ws.maxBufferedBytes * 4) {
+        log.warn(`terminating stalled conn ${ws.ctx.id.slice(0, 8)} (buffered ${ws.bufferedAmount}B)`);
         ws.terminate();
         continue;
       }

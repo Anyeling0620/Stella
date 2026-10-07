@@ -3,6 +3,7 @@
 const friendRepo = require('../repositories/friendRepo');
 const userRepo = require('../repositories/userRepo');
 const hub = require('../ws/hub');
+const presenceService = require('./presenceService');
 const { SERVER } = require('../ws/protocol');
 const { AppError } = require('../utils/errors');
 const { createLogger } = require('../utils/logger');
@@ -118,7 +119,9 @@ async function respond({ userId, requestId, action }) {
 }
 
 async function listFriends(userId) {
-  return friendRepo.listFriends(userId);
+  const friends = await friendRepo.listFriends(userId);
+  // Presence lives in memory, so it is layered on here rather than in the repo.
+  return presenceService.annotate(friends);
 }
 
 /**

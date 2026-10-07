@@ -8,14 +8,30 @@ import { STORAGE_KEYS } from '../config';
  * browser already does for a token change. The palettes live in `styles.css`
  * (`[data-theme='…']` blocks); this file only holds the ids and the plumbing.
  */
-export const THEME_IDS = ['acid', 'cyan', 'lime', 'magenta', 'ember', 'blueprint', 'paper'] as const;
+export const THEME_IDS = [
+  'wechat',
+  'wechat-dark',
+  'apple',
+  'apple-dark',
+  'acid',
+  'cyan',
+  'lime',
+  'magenta',
+  'ember',
+  'blueprint',
+  'paper',
+] as const;
 
 export type ThemeId = (typeof THEME_IDS)[number];
 
-export const DEFAULT_THEME: ThemeId = 'acid';
+export const DEFAULT_THEME: ThemeId = 'wechat';
 
 /** Human labels are only used as `title`/`aria-label`, never as visible copy. */
 export const THEME_LABELS: Record<ThemeId, string> = {
+  wechat: '微信绿',
+  'wechat-dark': '微信深色',
+  apple: '苹果',
+  'apple-dark': '苹果深色',
   acid: '酸性黄',
   cyan: '青',
   lime: '荧光绿',
@@ -23,6 +39,17 @@ export const THEME_LABELS: Record<ThemeId, string> = {
   ember: '橙焰',
   blueprint: '蓝图',
   paper: '纸白',
+};
+
+/**
+ * Light/dark counterpart of each theme, used by the rail's day/night toggle so
+ * it flips within the active theme family instead of jumping to WeChat dark.
+ */
+export const THEME_PAIRS: Partial<Record<ThemeId, ThemeId>> = {
+  wechat: 'wechat-dark',
+  'wechat-dark': 'wechat',
+  apple: 'apple-dark',
+  'apple-dark': 'apple',
 };
 
 const THEME_SET: ReadonlySet<string> = new Set(THEME_IDS);

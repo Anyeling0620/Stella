@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { useAppActions, useToasts } from '../context/AppContext';
 
 const ICONS: Record<string, string> = {
@@ -22,12 +23,14 @@ export function ToastHost() {
 
   return (
     <div className="toast-host" role="status" aria-live="polite">
-      {toasts.map((toast) => (
+      {toasts.map((toast, index) => (
         <div
           key={toast.id}
           className={`toast toast-${toast.kind}`}
           data-testid="toast"
           data-kind={toast.kind}
+          // 0 = newest (front, nearest the screen edge); older ones tuck behind.
+          style={{ '--depth': String(toasts.length - 1 - index) } as CSSProperties}
         >
           <span className="toast-icon" aria-hidden="true">
             {ICONS[toast.kind] ?? '💬'}

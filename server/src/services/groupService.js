@@ -5,6 +5,7 @@ const userRepo = require('../repositories/userRepo');
 const friendRepo = require('../repositories/friendRepo');
 const messageRepo = require('../repositories/messageRepo');
 const hub = require('../ws/hub');
+const presenceService = require('./presenceService');
 const { SERVER } = require('../ws/protocol');
 const { isValidAvatar } = require('../constants/avatars');
 const { AppError } = require('../utils/errors');
@@ -88,6 +89,10 @@ const broadcast = (memberIds, frame) => {
   for (const id of memberIds) hub.sendToUser(id, frame);
 };
 
+/** Presence is process-local, so rosters are decorated on the way out. */
+const withPresence = presenceService.annotate;
+const countOnline = presenceService.countOnline;
+
 /**
  * Adds members and fans out the roster change + a system notice.
  * Shared by the friend-add path and the join-approval path (which admits
@@ -97,15 +102,21 @@ async function admitMembers(groupId, memberIds, names) {
   if (memberIds.length === 0) return;
   await groupRepo.addMembers(groupId, memberIds);
   const allMembers = await groupRepo.listMemberIds(groupId);
-  const members = await groupRepo.listMembers(groupId);
+  const members = withPresence(await groupRepo.listMembers(groupId));
   broadcast(allMembers, { type: SERVER.GROUP_MEMBER_ADDED, groupId, members });
   await postSystemMessage(groupId, `${names.join('、')} 加入了群聊`, allMembers);
 }
 
 /** Group payload used by lifecycle pushes: base row + member count + members. */
 async function groupPayload(groupId) {
-  const [group, members] = await Promise.all([groupRepo.findById(groupId), groupRepo.listMembers(groupId)]);
-  return { ...groupRepo.toDTO(group), memberCount: members.length, members };
+  const [group, roster] = await Promise.all([groupRepo.findById(groupId), groupRepo.listMembers(groupId)]);
+  const members = withPresence(roster);
+  return {
+    ...groupRepo.toDTO(group),
+    memberCount: members.length,
+    onlineCount: countOnline(members),
+    members,
+  };
 }
 
 async function createGroup({ ownerId, name, memberIds }) {
@@ -133,14 +144,26 @@ async function createGroup({ ownerId, name, memberIds }) {
   return payload;
 }
 
-function list(userId) {
-  return groupRepo.listForUser(userId);
+async function list(userId) {
+  const rows = await groupRepo.listForUser(userId);
+  return Promise.all(
+    rows.map(async (row) => ({
+      ...row,
+      onlineCount: (await groupRepo.listMemberIds(row.id)).reduce(
+        (n, id) => n + (hub.isOnline(id) ? 1 : 0),
+        0
+      ),
+    }))
+  );
 }
 
 async function detail({ userId, groupId }) {
   const { group } = await assertMember(groupId, userId);
-  const members = await groupRepo.listMembers(Number(groupId));
-  return { group: groupRepo.toDTO(group), members };
+  const members = withPresence(await groupRepo.listMembers(Number(groupId)));
+  return {
+    group: { ...groupRepo.toDTO(group), memberCount: members.length, onlineCount: countOnline(members) },
+    members,
+  };
 }
 
 async function update({ userId, groupId, patch = {} }) {
@@ -303,7 +326,7 @@ async function removeMember({ userId, groupId, memberId }) {
 
   await groupRepo.removeMember(gid, targetId);
   const memberIds = await groupRepo.listMemberIds(gid);
-  const members = await groupRepo.listMembers(gid);
+  const members = withPresence(await groupRepo.listMembers(gid));
   const frame = { type: SERVER.GROUP_MEMBER_REMOVED, groupId: gid, members, removedUserId: targetId };
   // The removed user is told explicitly (so their UI drops the group)…
   hub.sendToUser(targetId, frame);
@@ -336,7 +359,7 @@ async function leave({ userId, groupId }) {
   const me = await userRepo.findPublicById(userId);
   await groupRepo.removeMember(gid, userId);
   const memberIds = await groupRepo.listMemberIds(gid);
-  const members = await groupRepo.listMembers(gid);
+  const members = withPresence(await groupRepo.listMembers(gid));
   const frame = { type: SERVER.GROUP_MEMBER_LEFT, groupId: gid, userId: Number(userId), members };
   hub.sendToUser(userId, frame);
   broadcast(memberIds, frame);

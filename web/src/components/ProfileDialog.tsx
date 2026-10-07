@@ -2,8 +2,7 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { authApi } from '../lib/api';
 import { ApiError } from '../lib/axiosClient';
 import { AVATAR_PRESET_IDS } from '../lib/avatarPresets';
-import { THEME_IDS, THEME_LABELS, applyTheme, readStoredTheme, type ThemeId } from '../lib/theme';
-import { useAppActions, useAppRealtime, useAppSession } from '../context/AppContext';
+import { useAppActions, useAppSession } from '../context/AppContext';
 import { Avatar } from './Avatar';
 
 interface ProfileDialogProps {
@@ -12,19 +11,16 @@ interface ProfileDialogProps {
 }
 
 /**
- * Settings dialog: preset avatar picker, nickname, and theme.
+ * Personal profile editor: preset avatar + nickname.
  *
- * The avatar/nickname are server state; the theme is device-local (localStorage)
- * and applies instantly to `<html data-theme>`, so it is deliberately not sent
- * to the backend.
+ * Application settings (theme, transport, account) live in SettingsDialog — this
+ * dialog only owns the two fields that are server state.
  */
 export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
   const { user } = useAppSession();
-  const { transportMode, transportHost, transport } = useAppRealtime();
-  const { updateUser, pushToast, setTransportMode, setTransportHost } = useAppActions();
+  const { updateUser, pushToast } = useAppActions();
   const [nickname, setNickname] = useState('');
   const [avatar, setAvatar] = useState<string | null>(null);
-  const [theme, setTheme] = useState<ThemeId>(() => readStoredTheme());
   const [saving, setSaving] = useState(false);
 
   // Re-sync the draft each time the dialog opens.
@@ -32,7 +28,6 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
     if (!open || !user) return;
     setNickname(user.nickname);
     setAvatar(user.avatar ?? null);
-    setTheme(readStoredTheme());
     setSaving(false);
   }, [open, user]);
 
@@ -83,39 +78,42 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
     <div className="dialog-overlay" onMouseDown={close} data-testid="profile-dialog">
       <form className="dialog" onMouseDown={(e) => e.stopPropagation()} onSubmit={submit}>
         <header className="dialog-head">
-          <span className="dialog-title">资料</span>
+          <span className="dialog-title">个人资料</span>
           <button type="button" className="icon-btn" onClick={close} aria-label="关闭">
             ×
           </button>
         </header>
 
         <div className="dialog-body">
-          <div className="avatar-grid" role="radiogroup" aria-label="头像">
-            <button
-              type="button"
-              className="avatar-option"
-              data-testid="avatar-option"
-              data-avatar-id="none"
-              aria-checked={avatar === null}
-              aria-label="不使用头像"
-              onClick={() => setAvatar(null)}
-            >
-              <Avatar name={user.nickname} avatar={null} size={46} tone="muted" />
-            </button>
-            {AVATAR_PRESET_IDS.map((id) => (
+          <div className="field">
+            <span>头像</span>
+            <div className="avatar-grid" role="radiogroup" aria-label="头像">
               <button
-                key={id}
                 type="button"
                 className="avatar-option"
                 data-testid="avatar-option"
-                data-avatar-id={id}
-                aria-checked={avatar === id}
-                aria-label={id}
-                onClick={() => setAvatar(id)}
+                data-avatar-id="none"
+                aria-checked={avatar === null}
+                aria-label="不使用头像"
+                onClick={() => setAvatar(null)}
               >
-                <Avatar name={user.nickname} avatar={id} size={46} />
+                <Avatar name={user.nickname} avatar={null} size={46} tone="muted" />
               </button>
-            ))}
+              {AVATAR_PRESET_IDS.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  className="avatar-option"
+                  data-testid="avatar-option"
+                  data-avatar-id={id}
+                  aria-checked={avatar === id}
+                  aria-label={id}
+                  onClick={() => setAvatar(id)}
+                >
+                  <Avatar name={user.nickname} avatar={id} size={46} />
+                </button>
+              ))}
+            </div>
           </div>
 
           <label className="field">
@@ -130,84 +128,8 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
           </label>
 
           <div className="field">
-            <span>主题</span>
-            <div className="theme-grid" role="radiogroup" aria-label="主题">
-              {THEME_IDS.map((id) => (
-                // `data-theme` on the swatch makes its own tokens resolve here,
-                // so each swatch previews the real palette without duplicating it.
-                <button
-                  key={id}
-                  type="button"
-                  className="theme-option"
-                  data-theme={id}
-                  data-testid="theme-option"
-                  data-theme-id={id}
-                  aria-checked={theme === id}
-                  aria-label={THEME_LABELS[id]}
-                  title={THEME_LABELS[id]}
-                  onClick={() => {
-                    setTheme(id);
-                    applyTheme(id);
-                  }}
-                >
-                  <span className="theme-option-fill" />
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="field">
-            <span>传输模式</span>
-            <div className="segmented" role="radiogroup" aria-label="传输模式">
-              <button
-                type="button"
-                className={transport === 'shared-worker' ? 'active' : ''}
-                data-testid="host-shared-worker"
-                aria-checked={transportHost === 'shared-worker'}
-                onClick={() => setTransportHost('shared-worker')}
-              >
-                SharedWorker 单连接
-              </button>
-              <button
-                type="button"
-                className={transport === 'in-tab-fallback' ? 'active' : ''}
-                data-testid="host-in-tab"
-                aria-checked={transportHost === 'in-tab'}
-                onClick={() => setTransportHost('in-tab')}
-              >
-                页内单例抢占
-              </button>
-            </div>
-            <p className="field-hint">
-              SharedWorker：整个浏览器共享一条长连接（默认，自动检测）。页内单例抢占：不依赖 Worker，由最新打开的窗口独占连接并转发给其它窗口。切换会重建连接。
-            </p>
-          </div>
-
-          <div className="field">
-            <span>连接策略</span>
-            <div className="segmented" role="radiogroup" aria-label="连接策略">
-              <button
-                type="button"
-                className={transportMode === 'auto' ? 'active' : ''}
-                data-testid="transport-auto"
-                aria-checked={transportMode === 'auto'}
-                onClick={() => setTransportMode('auto')}
-              >
-                自动（WebSocket 优先）
-              </button>
-              <button
-                type="button"
-                className={transportMode === 'poll' ? 'active' : ''}
-                data-testid="transport-poll"
-                aria-checked={transportMode === 'poll'}
-                onClick={() => setTransportMode('poll')}
-              >
-                仅轮询（关闭 WS）
-              </button>
-            </div>
-            <p className="field-hint">
-              仅轮询会停用 WebSocket，改用 HTTP 增量轮询（用于验证断线降级链路）。改后立即生效，无需保存。
-            </p>
+            <span>用户名</span>
+            <div className="field-readonly">@{user.username}</div>
           </div>
         </div>
 

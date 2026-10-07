@@ -47,9 +47,23 @@ interface LocalMessage {
 }
 
 const PAGE_SIZE = 50;
+/**
+ * Hard cap on messages held in memory for one open conversation (design spec:
+ * 单会话持有消息上限 1000 条). Because the thread keeps every live frame, a busy
+ * conversation would otherwise grow without bound; the oldest rows are evicted
+ * and the "load older" entry stays available.
+ */
+const MAX_MESSAGES = 1000;
 const PENDING_TIMEOUT_MS = 8000;
-/** Incoming messages are coalesced into one read-receipt call per window. */
-const READ_FLUSH_MS = 400;
+/**
+ * Minimum time the "sending" indicator stays on screen. A WebSocket echo lands
+ * in a few milliseconds, so without this the spinner would flash for a single
+ * frame and be effectively invisible.
+ */
+const MIN_PENDING_MS = 500;
+/** Incoming messages are coalesced into one read-receipt call per window.
+    Kept short so the sender's 已读 tick feels immediate. */
+const READ_FLUSH_MS = 250;
 
 /** Built-in emoji panel (WeChat-style 表情). Inserted as plain unicode text. */
 const EMOJIS = [
@@ -58,6 +72,10 @@ const EMOJIS = [
   '🎉','🔥','💯','✨','❤️','💔','🌹','🍺','🍰','🎁','⚽','🚀',
   '✅','❌','⚠️','💡','📌','📎','📷','🎵','☕','🌙','☀️','🐶',
 ];
+
+/** Keeps at most `MAX_MESSAGES` rows (newest kept) so the thread cannot grow unbounded. */
+const capMessages = (list: LocalMessage[]): LocalMessage[] =>
+  list.length > MAX_MESSAGES ? list.slice(list.length - MAX_MESSAGES) : list;
 
 interface ChatWindowProps {
   kind: 'direct' | 'group';
@@ -71,6 +89,8 @@ interface ChatWindowProps {
   peerHint?: User | null;
   /** Live group entry (group only) — preferred over the history snapshot. */
   groupHint?: Group | null;
+  /** Live presence (user id -> online), owned by ChatShell. */
+  presence: Record<number, boolean>;
   /** Mobile-only back affordance; the pane is chosen by ChatShell. */
   onBack?: () => void;
 }
@@ -117,6 +137,106 @@ const renderContent = (content: string, names: string[]) => {
   return nodes;
 };
 
+/** "最后活跃 …" shown for an offline 1:1 peer. */
+function formatLastSeen(iso?: string | null): string {
+  if (!iso) return '离线';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '离线';
+  const minutes = Math.floor((Date.now() - then) / 60000);
+  if (minutes < 1) return '刚刚活跃';
+  if (minutes < 60) return `${minutes} 分钟前活跃`;
+  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)} 小时前活跃`;
+  return '离线';
+}
+
+/** Single tick — the message reached the server (已送达). */
+const SentIcon = () => (
+  <svg className="bubble-check" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+    <path
+      d="M3 8.4l3.2 3.2L13 4.8"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+/** Double tick — the peer has read it (已读). */
+const ReadIcon = () => (
+  <svg className="bubble-check" viewBox="0 0 20 16" width="18" height="14" aria-hidden="true">
+    <path
+      d="M1.4 8.4l3.2 3.2L11 4.8"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <path
+      d="M7 8.4l3.2 3.2L16.6 4.8"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+/**
+ * Composer glyphs — drawn as line art on the same grid as the rail icons, so
+ * they read as one icon language instead of stray emoji/text characters.
+ */
+const glyphProps = {
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.7,
+  strokeLinecap: 'round' as const,
+  strokeLinejoin: 'round' as const,
+  'aria-hidden': true,
+};
+
+const EmojiIcon = () => (
+  <svg className="composer-icon" width="22" height="22" {...glyphProps}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M8.4 14.4a4.6 4.6 0 0 0 7.2 0" />
+    <circle cx="9.2" cy="9.6" r="0.7" fill="currentColor" stroke="none" />
+    <circle cx="14.8" cy="9.6" r="0.7" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const PlusCircleIcon = () => (
+  <svg className="composer-icon" width="22" height="22" {...glyphProps}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 8.4v7.2M8.4 12h7.2" />
+  </svg>
+);
+
+const MentionIcon = () => (
+  <svg className="composer-icon" width="22" height="22" {...glyphProps}>
+    <circle cx="12" cy="12" r="3.6" />
+    <path d="M15.6 8.4v5.1a2.55 2.55 0 0 0 5.1 0V12a8.7 8.7 0 1 0-3.4 6.9" />
+  </svg>
+);
+
+const PhotoIcon = () => (
+  <svg className="attach-icon" width="18" height="18" {...glyphProps}>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
+    <circle cx="9" cy="10" r="1.5" />
+    <path d="M4.5 17.2l4.3-4.3 3.7 3.7 2.6-2.6 4.4 4.4" />
+  </svg>
+);
+
+const DocumentIcon = () => (
+  <svg className="file-icon-svg" width="26" height="26" {...glyphProps}>
+    <path d="M6.5 4.3c0-1 .8-1.8 1.8-1.8h5.2l5 5v12.2c0 1-.8 1.8-1.8 1.8H8.3c-1 0-1.8-.8-1.8-1.8z" />
+    <path d="M13.5 2.5v4.9h4.9" />
+  </svg>
+);
+
 /**
  * A single bubble. Memoized: message objects keep their identity between
  * updates, so appending a message leaves every other row untouched.
@@ -152,10 +272,16 @@ const MessageRow = memo(function MessageRow({
         {!mine && <Avatar name={otherName} avatar={otherAvatar} size={32} tone="muted" />}
         <div className="bubble-column">
           {!mine && showSenderName && <div className="bubble-sender">{otherName}</div>}
-          <div
+          <div className={`bubble-line ${mine ? 'mine' : ''}`}>
+            {/* Sending: spinner on the leading edge, centred on the bubble itself
+                (not on the bubble + timestamp row). */}
+            {mine && message.pending && (
+              <span className="spinner bubble-spinner" role="status" aria-label="发送中" />
+            )}
+            <div
             className={`bubble ${mine ? 'bubble-mine' : 'bubble-theirs'} ${
               message.failed ? 'bubble-failed' : ''
-            } ${mentionMe ? 'bubble-mention' : ''} ${
+            } ${message.pending ? 'bubble-pending' : ''} ${mentionMe ? 'bubble-mention' : ''} ${
               message.type === 'image' || message.type === 'file' ? 'bubble-media' : ''
             }`}
           >
@@ -177,7 +303,7 @@ const MessageRow = memo(function MessageRow({
             ) : message.type === 'file' ? (
               <div className="bubble-file">
                 <span className="file-icon" aria-hidden="true">
-                  📄
+                  <DocumentIcon />
                 </span>
                 <span className="file-main">
                   <span className="file-name">{message.attachment?.name ?? '文件'}</span>
@@ -199,10 +325,10 @@ const MessageRow = memo(function MessageRow({
             ) : (
               renderContent(message.content, mentionNames)
             )}
+            </div>
           </div>
           <div className="bubble-meta">
             {formatClock(message.createdAt)}
-            {mine && message.pending && <span className="bubble-state">发送中…</span>}
             {mine && message.failed && (
               <>
                 <span className="bubble-state failed">发送失败</span>
@@ -211,9 +337,15 @@ const MessageRow = memo(function MessageRow({
                 </button>
               </>
             )}
-            {/* Group messages have no per-message read state (QQ/微信 style). */}
+            {/* Group messages have no per-message read state (WeChat style). */}
             {mine && !message.pending && !message.failed && showSenderName === false && (
-              <span className="bubble-state">{message.status >= 2 ? '已读' : '已送达'}</span>
+              <span
+                className="bubble-state"
+                title={message.status >= 2 ? '已读' : '已送达'}
+                aria-label={message.status >= 2 ? '已读' : '已送达'}
+              >
+                {message.status >= 2 ? <ReadIcon /> : <SentIcon />}
+              </span>
             )}
           </div>
         </div>
@@ -229,6 +361,7 @@ export const ChatWindow = memo(function ChatWindow({
   frozen,
   peerHint,
   groupHint,
+  presence,
   onBack,
 }: ChatWindowProps) {
   const { subscribeFrames, publishCursor, sendFrame, pushToast } = useAppActions();
@@ -274,8 +407,12 @@ export const ChatWindow = memo(function ChatWindow({
    *     inserted, so the same content stays under the cursor afterwards.
    */
   const atBottomRef = useRef(true);
+  /** Mirrors `conversationId` so deferred callbacks can bail if it changed. */
+  const conversationRef = useRef(conversationId);
   const pendingPrependRef = useRef<{ height: number; top: number } | null>(null);
   const pendingTimers = useRef(new Map<string, number>());
+  /** When each optimistic bubble first showed "sending" (for MIN_PENDING_MS). */
+  const pendingSinceRef = useRef(new Map<string, number>());
   const pendingReadIds = useRef(new Set<number>());
   const pendingGroupReadId = useRef(0);
   const readFlushTimer = useRef<number | null>(null);
@@ -285,12 +422,37 @@ export const ChatWindow = memo(function ChatWindow({
     return seqRef.current;
   }, []);
 
+  /**
+   * Object URLs created for image uploads (shown before the server echo). They
+   * pin the underlying Blob in memory until revoked, so every one we create is
+   * tracked and released as soon as it is no longer rendered.
+   */
+  const objectUrls = useRef(new Set<string>());
+  const trackObjectUrl = useCallback((url: string) => {
+    objectUrls.current.add(url);
+  }, []);
+  /** Revokes one tracked object URL (no-op if already revoked). */
+  const revokeObjectUrl = useCallback((url?: string | null) => {
+    if (url && objectUrls.current.delete(url)) URL.revokeObjectURL(url);
+  }, []);
+  const revokeAllObjectUrls = useCallback(() => {
+    for (const url of objectUrls.current) URL.revokeObjectURL(url);
+    objectUrls.current.clear();
+  }, []);
+  // Release every preview URL when the window unmounts.
+  useEffect(() => () => revokeAllObjectUrls(), [revokeAllObjectUrls]);
+
   const clearPendingTimer = useCallback((clientMsgId: string) => {
     const timer = pendingTimers.current.get(clientMsgId);
     if (timer !== undefined) {
       window.clearTimeout(timer);
       pendingTimers.current.delete(clientMsgId);
     }
+  }, []);
+
+  /** Stamps the moment a bubble enters the "sending" state. */
+  const beginPending = useCallback((clientMsgId: string) => {
+    pendingSinceRef.current.set(clientMsgId, performance.now());
   }, []);
 
   // -------------------------------------------------------------------------
@@ -353,14 +515,28 @@ export const ChatWindow = memo(function ChatWindow({
   /** Insert or reconcile a message, keyed by client id then server id. */
   const upsert = useCallback(
     (incoming: ChatMessage) => {
-      if (incoming.clientMsgId) clearPendingTimer(incoming.clientMsgId);
+      const clientMsgId = incoming.clientMsgId;
+      if (clientMsgId) clearPendingTimer(clientMsgId);
+
+      const forConversation = conversationId;
+      // Keep the "sending" look for a beat so a fast echo doesn't flicker.
+      const since = clientMsgId ? pendingSinceRef.current.get(clientMsgId) : undefined;
+      if (clientMsgId) pendingSinceRef.current.delete(clientMsgId);
+      const holdMs = since === undefined ? 0 : Math.max(0, MIN_PENDING_MS - (performance.now() - since));
 
       setMessages((previous) => {
-        if (incoming.clientMsgId) {
-          const index = previous.findIndex((m) => m.clientMsgId && m.clientMsgId === incoming.clientMsgId);
+        // Never apply an echo after the user switched threads.
+        if (conversationRef.current !== forConversation) return previous;
+        if (clientMsgId) {
+          const index = previous.findIndex((m) => m.clientMsgId && m.clientMsgId === clientMsgId);
           if (index >= 0) {
             const next = [...previous];
-            next[index] = { ...incoming, seq: previous[index].seq };
+            // The echo replaces the optimistic bubble: release its preview Blob.
+            revokeObjectUrl(previous[index].localUrl);
+            // Adopt the server state NOW (real id + status) so a read receipt
+            // arriving during the hold can still match this message by id; only
+            // the visual "sending" flag is held back.
+            next[index] = { ...incoming, seq: previous[index].seq, pending: holdMs > 0 };
             return next;
           }
         }
@@ -372,10 +548,19 @@ export const ChatWindow = memo(function ChatWindow({
             );
           }
         }
-        return [...previous, { ...incoming, seq: nextSeq() }];
+        return capMessages([...previous, { ...incoming, seq: nextSeq() }]);
       });
+
+      if (holdMs > 0 && clientMsgId) {
+        window.setTimeout(() => {
+          if (conversationRef.current !== forConversation) return;
+          setMessages((previous) =>
+            previous.map((m) => (m.clientMsgId === clientMsgId && m.pending ? { ...m, pending: false } : m))
+          );
+        }, holdMs);
+      }
     },
-    [clearPendingTimer, nextSeq]
+    [clearPendingTimer, conversationId, nextSeq, revokeObjectUrl]
   );
 
   // -------------------------------------------------------------------------
@@ -383,13 +568,16 @@ export const ChatWindow = memo(function ChatWindow({
   // -------------------------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
+    conversationRef.current = conversationId;
     seqRef.current = 0;
     olderSeqRef.current = 0;
     pendingTimers.current.forEach((timer) => window.clearTimeout(timer));
     pendingTimers.current.clear();
+    pendingSinceRef.current.clear();
     pendingReadIds.current.clear();
     pendingGroupReadId.current = 0;
     flushReads();
+    revokeAllObjectUrls();
     setMessages([]);
     setPeer(null);
     setGroup(null);
@@ -458,7 +646,13 @@ export const ChatWindow = memo(function ChatWindow({
     return () => {
       cancelled = true;
     };
-  }, [conversationId, isGroup, myId, nextSeq, publishCursor, queueRead, queueGroupRead, pushToast, flushReads]);
+  }, [conversationId, isGroup, myId, nextSeq, publishCursor, queueRead, queueGroupRead, pushToast, flushReads, revokeAllObjectUrls]);
+
+  // Once the cap starts evicting the oldest rows there is, by definition, older
+  // history to fetch — keep the "load older" entry available.
+  useEffect(() => {
+    if (messages.length >= MAX_MESSAGES && !hasMore) setHasMore(true);
+  }, [messages.length, hasMore]);
 
   // -------------------------------------------------------------------------
   // Live increment (WebSocket frames, including normalised poll results)
@@ -489,7 +683,11 @@ export const ChatWindow = memo(function ChatWindow({
         const readerId = Number(frame.readerId);
         if (readerId !== conversationId || ids.length === 0) return;
         setMessages((previous) =>
-          previous.map((message) => (ids.includes(message.id) ? { ...message, status: 2 } : message))
+          previous.map((message) =>
+            // A read receipt is definitive proof of delivery, so it also ends any
+            // "sending" hold immediately — the double tick must not wait it out.
+            ids.includes(message.id) ? { ...message, status: 2, pending: false } : message
+          )
         );
         return;
       }
@@ -767,6 +965,10 @@ export const ChatWindow = memo(function ChatWindow({
     async (file: File, kind: 'image' | 'file') => {
       if (!conversationId) return;
       const clientMsgId = uid();
+      // Preview the image instantly; the URL is tracked so it can be revoked once
+      // the server echo replaces the optimistic bubble (or the thread is closed).
+      const localUrl = kind === 'image' ? URL.createObjectURL(file) : undefined;
+      if (localUrl) trackObjectUrl(localUrl);
       const optimistic: LocalMessage = {
         seq: nextSeq(),
         id: 0,
@@ -776,14 +978,15 @@ export const ChatWindow = memo(function ChatWindow({
         groupId: isGroup ? conversationId : null,
         type: kind,
         attachment: { id: 0, kind, name: file.name, size: file.size, mime: file.type || 'application/octet-stream' },
-        localUrl: kind === 'image' ? URL.createObjectURL(file) : undefined,
+        localUrl,
         uploading: 0,
         content: kind === 'image' ? '[图片]' : `[文件] ${file.name}`,
         status: 0,
         createdAt: new Date().toISOString(),
         pending: true,
       };
-      setMessages((previous) => [...previous, optimistic]);
+      setMessages((previous) => capMessages([...previous, optimistic]));
+      beginPending(clientMsgId);
       setAttachOpen(false);
       try {
         const { attachment } = await attachmentApi.upload(file, (percent) => {
@@ -809,7 +1012,7 @@ export const ChatWindow = memo(function ChatWindow({
         });
       }
     },
-    [conversationId, isGroup, myId, nextSeq, armPendingTimeout, deliverMedia, pushToast]
+    [conversationId, isGroup, myId, nextSeq, beginPending, armPendingTimeout, deliverMedia, pushToast, trackObjectUrl]
   );
 
   const submit = useCallback(() => {
@@ -832,13 +1035,14 @@ export const ChatWindow = memo(function ChatWindow({
       createdAt: new Date().toISOString(),
       pending: true,
     };
-    setMessages((previous) => [...previous, optimistic]);
+    setMessages((previous) => capMessages([...previous, optimistic]));
     setDraft('');
     setMentioned([]);
     setMentionOpen(false);
+    beginPending(clientMsgId);
     armPendingTimeout(clientMsgId);
     void deliver(clientMsgId, content, mentions);
-  }, [draft, conversationId, sending, myId, isGroup, mentioned, nextSeq, armPendingTimeout, deliver]);
+  }, [draft, conversationId, sending, myId, isGroup, mentioned, nextSeq, beginPending, armPendingTimeout, deliver]);
 
   const onSubmit = useCallback(
     (event: FormEvent) => {
@@ -859,6 +1063,7 @@ export const ChatWindow = memo(function ChatWindow({
         setMessages((previous) =>
           previous.map((m) => (m.seq === message.seq ? { ...m, failed: false, pending: true } : m))
         );
+        beginPending(message.clientMsgId);
         armPendingTimeout(message.clientMsgId);
         void deliverMedia(message.clientMsgId, { type: message.type, attachmentId: message.attachment.id });
         return;
@@ -866,10 +1071,11 @@ export const ChatWindow = memo(function ChatWindow({
       setMessages((previous) =>
         previous.map((m) => (m.seq === message.seq ? { ...m, failed: false, pending: true } : m))
       );
+      beginPending(message.clientMsgId);
       armPendingTimeout(message.clientMsgId);
       void deliver(message.clientMsgId, message.content, message.mentions ?? []);
     },
-    [armPendingTimeout, deliver, deliverMedia, pushToast]
+    [beginPending, armPendingTimeout, deliver, deliverMedia, pushToast]
   );
 
   const insertEmoji = useCallback((emoji: string) => {
@@ -910,6 +1116,11 @@ export const ChatWindow = memo(function ChatWindow({
   const groupName = displayGroup?.name ?? `群聊 #${conversationId}`;
   const groupAvatar = displayGroup?.avatar ?? null;
   const memberCount = displayGroup?.memberCount ?? members.length;
+  const peerOnline = presence[Number(conversationId)] ?? Boolean(displayPeer?.online);
+  // Prefer the roster we hold (live presence) and fall back to the server count.
+  const onlineMemberCount = members.length
+    ? members.reduce((n, member) => n + ((presence[member.id] ?? member.online) ? 1 : 0), 0)
+    : displayGroup?.onlineCount ?? 0;
   const mentionNames = useMemo(() => members.map((m) => m.nickname), [members]);
   const mentionCandidates = useMemo(() => members.filter((m) => m.id !== myId), [members, myId]);
 
@@ -944,7 +1155,13 @@ export const ChatWindow = memo(function ChatWindow({
         <div className="chat-header-info">
           <div className="chat-header-name">{isGroup ? groupName : displayPeer?.nickname ?? `用户 #${conversationId}`}</div>
           <div className="chat-header-sub">
-            {isGroup ? `${memberCount} 位成员` : `@${displayPeer?.username ?? conversationId}`}
+            {isGroup ? (
+              `${onlineMemberCount} 人在线 · 共 ${memberCount} 人`
+            ) : peerOnline ? (
+              <span className="is-online">在线</span>
+            ) : (
+              formatLastSeen(displayPeer?.lastSeenAt)
+            )}
           </div>
         </div>
         {isGroup && (
@@ -975,12 +1192,24 @@ export const ChatWindow = memo(function ChatWindow({
               onClick={loadOlder}
               disabled={loadingMore}
             >
-              {loadingMore ? '加载中…' : '加载更早的消息'}
+              {loadingMore ? (
+                <>
+                  <span className="spinner spinner-sm" aria-hidden="true" />
+                  加载中
+                </>
+              ) : (
+                '加载更早的消息'
+              )}
             </button>
           </div>
         )}
 
-        {loading && <div className="chat-placeholder">正在加载历史消息…</div>}
+        {loading && (
+          <div className="chat-placeholder" role="status">
+            <span className="spinner spinner-sm" aria-hidden="true" />
+            正在加载历史消息…
+          </div>
+        )}
 
         {!loading && ordered.length === 0 && <div className="chat-placeholder">还没有消息</div>}
 
@@ -1048,7 +1277,8 @@ export const ChatWindow = memo(function ChatWindow({
               data-testid="attach-image"
               onClick={() => imageInputRef.current?.click()}
             >
-              🖼️ 图片
+              <PhotoIcon />
+              图片
             </button>
             <button
               type="button"
@@ -1056,7 +1286,8 @@ export const ChatWindow = memo(function ChatWindow({
               data-testid="attach-file"
               onClick={() => fileInputRef.current?.click()}
             >
-              📎 文件
+              <DocumentIcon />
+              文件
             </button>
           </div>
         )}
@@ -1078,79 +1309,79 @@ export const ChatWindow = memo(function ChatWindow({
         )}
 
         <div className="composer-row">
-  <div className="composer-toolbar">
-    {isGroup && (
-      <button
-        type="button"
-        className="icon-btn composer-tool"
-        data-testid="composer-mention"
-        aria-label="@某人"
-        title="@某人"
-        disabled={frozen}
-        onClick={() => {
-          setAttachOpen(false);
-          setEmojiOpen(false);
-          setMentionOpen((open) => !open);
-        }}
-      >
-        @
-      </button>
-    )}
-    <button
-      type="button"
-      className="icon-btn composer-tool"
-      data-testid="composer-attach"
-      aria-label="发送图片或文件"
-      title="图片 / 文件"
-      disabled={frozen}
-      onClick={() => {
-        setEmojiOpen(false);
-        setAttachOpen((open) => !open);
-      }}
-    >
-      ＋
-    </button>
-    <button
-      type="button"
-      className="icon-btn composer-tool composer-emoji"
-      data-testid="composer-emoji"
-      aria-label="表情"
-      title="表情"
-      disabled={frozen}
-      onClick={() => {
-        setAttachOpen(false);
-        setEmojiOpen((open) => !open);
-      }}
-    >
-      😊
-    </button>
+          {/* WeChat order: the text field sits above the icon/send toolbar. */}
+          <textarea
+            ref={composerRef}
+            data-testid="composer-input"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                submit();
+              }
+            }}
+            placeholder={frozen ? '当前窗口已冻结' : '消息'}
+            rows={2}
+            disabled={frozen}
+          />
 
-    <button
-      type="submit"
-      className="btn btn-primary"
-      data-testid="composer-send"
-      disabled={frozen || sending || draft.trim().length === 0}
-    >
-      发送
-    </button>
-  </div>
-
-  <textarea
-    ref={composerRef}
-    data-testid="composer-input"
-    value={draft}
-    onChange={(event) => setDraft(event.target.value)}
-    onKeyDown={(event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        submit();
-      }
-    }}
-    placeholder={frozen ? '当前窗口已冻结' : '消息'}
-    rows={2}
-    disabled={frozen}
-  />
-</div>
+          <div className="composer-toolbar">
+            {isGroup && (
+              <button
+                type="button"
+                className="icon-btn composer-tool"
+                data-testid="composer-mention"
+                aria-label="@某人"
+                title="@某人"
+                disabled={frozen}
+                onClick={() => {
+                  setAttachOpen(false);
+                  setEmojiOpen(false);
+                  setMentionOpen((open) => !open);
+                }}
+              >
+                <MentionIcon />
+              </button>
+            )}
+            <button
+              type="button"
+              className="icon-btn composer-tool"
+              data-testid="composer-attach"
+              aria-label="发送图片或文件"
+              title="图片 / 文件"
+              disabled={frozen}
+              onClick={() => {
+                setEmojiOpen(false);
+                setAttachOpen((open) => !open);
+              }}
+            >
+              <PlusCircleIcon />
+            </button>
+            <button
+              type="button"
+              className="icon-btn composer-tool"
+              data-testid="composer-emoji"
+              aria-label="表情"
+              title="表情"
+              disabled={frozen}
+              onClick={() => {
+                setAttachOpen(false);
+                setEmojiOpen((open) => !open);
+              }}
+            >
+              <EmojiIcon />
+            </button>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              data-testid="composer-send"
+              disabled={frozen || sending || draft.trim().length === 0}
+            >
+              发送
+            </button>
+          </div>
+        </div>
 
         {/* Hidden pickers driven by the attach menu. */}
         <input
@@ -1177,6 +1408,7 @@ export const ChatWindow = memo(function ChatWindow({
           members={members}
           myId={myId}
           frozen={frozen}
+          presence={presence}
           onClose={() => setGroupInfoOpen(false)}
         />
       )}

@@ -14,7 +14,10 @@ const pool = mysql.createPool({
   database: config.db.database,
   waitForConnections: true,
   connectionLimit: config.db.connectionLimit,
-  queueLimit: 0,
+  queueLimit: config.db.queueLimit,
+  // Drop idle connections so a burst does not keep the whole pool parked.
+  maxIdle: config.db.connectionLimit,
+  idleTimeout: 60_000,
   charset: 'utf8mb4_general_ci',
   // Everything is handled in UTC end-to-end: the session time zone is pinned
   // below and DATETIME values are parsed/serialised as UTC ('Z').

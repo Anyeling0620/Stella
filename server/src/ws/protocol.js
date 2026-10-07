@@ -27,6 +27,8 @@ const SERVER = {  // 这是一个定义WebSocket服务器端事件类型的对�
   FRIEND_REMOVED: 'friend:removed',
   /** Nickname/avatar changed: sent to the user's own tabs and all their friends. */
   PROFILE_UPDATED: 'profile:updated',
+  /** A friend / group co-member came online or went offline. */
+  PRESENCE: 'presence',
   SYSTEM_NOTICE: 'notice:system',
   SESSION_INVALID: 'session:invalid',
   // Group chat lifecycle. Each is fanned out to every member's tabs.

@@ -42,6 +42,10 @@ const config = {
     password: process.env.DB_PASSWORD || '123456',
     database: process.env.DB_NAME || 'stella_im',
     connectionLimit: toInt(process.env.DB_POOL, 10),
+    // Cap the pending-query queue. `0` means "unbounded", which lets a query
+    // flood (e.g. a client spamming chat:send) grow the queue until the process
+    // OOMs; a finite cap makes the pool reject instead of buffering forever.
+    queueLimit: toInt(process.env.DB_QUEUE_LIMIT, 1000),
   },
 
   jwt: {
@@ -60,6 +64,13 @@ const config = {
     // periodic token re-validation for every live socket
     authCheckIntervalMs: toInt(process.env.WS_AUTH_CHECK_MS, 60_000),
     maxPayloadBytes: 1024 * 256,
+    // Backpressure: how many bytes may sit unsent in one socket's buffer before
+    // we consider it a stalled client (it never drains) and drop/close it. Keeps
+    // one stuck consumer from buffering the whole broadcast in memory.
+    maxBufferedBytes: toInt(process.env.WS_MAX_BUFFERED_BYTES, 1024 * 1024),
+    // Max client frames being processed concurrently per connection. Bounds the
+    // async work a single fast sender can queue up.
+    maxInflightFrames: toInt(process.env.WS_MAX_INFLIGHT, 32),
   },
 
   systemNotice: {

@@ -7,6 +7,8 @@ export interface User {
   avatar: string | null;
   createdAt?: string;
   lastSeenAt?: string | null;
+  /** Live presence, kept current by `presence` frames. */
+  online?: boolean;
   isFriend?: boolean;
   /** Present on the friend list — the newest 1:1 message, for list previews. */
   lastMessage?: ConversationPreview | null;
@@ -74,6 +76,8 @@ export interface GroupMember {
   avatar: string | null;
   role: 'owner' | 'member';
   joinedAt: string;
+  /** Live presence, kept current by `presence` frames. */
+  online?: boolean;
 }
 
 export interface GroupLastMessage {
@@ -99,6 +103,8 @@ export interface Group {
   updatedAt: string;
   role?: 'owner' | 'member';
   memberCount?: number;
+  /** How many members are online right now (server-computed). */
+  onlineCount?: number;
   unread?: number;
   mentioned?: boolean;
   /** My pending join application's status, from group search. */

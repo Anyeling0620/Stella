@@ -65,7 +65,12 @@ export const GroupsPanel = memo(function GroupsPanel({
         });
     }, 300);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      // Cancel the in-flight query too, so leaving the panel (or typing again)
+      // never leaves an orphaned request resolving into a dead component.
+      abortRef.current?.abort();
+    };
   }, [keyword, pushToast]);
 
   const apply = async (group: Group) => {
@@ -113,8 +118,8 @@ export const GroupsPanel = memo(function GroupsPanel({
             const pending = requested.has(group.id) || group.requestStatus === 'pending';
             return (
               <div key={group.id} className="list-row" data-testid="group-search-result" data-group-id={group.id}>
-                <Avatar name={group.name} avatar={group.avatar} size={34} tone="muted" />
-                <div className="list-row-main">
+                <Avatar name={group.name} avatar={group.avatar} size={40} tone="muted" />
+                <div className="list-row-text">
                   <div className="list-row-title">{group.name}</div>
                   <div className="list-row-sub">
                     群号 {group.groupNo ?? '—'} · {group.memberCount ?? 0} 人

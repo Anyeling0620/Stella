@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const config = require('../config');
 const { createLogger } = require('../utils/logger');
 
 const log = createLogger('ws:hub');
@@ -27,6 +28,8 @@ class Hub {  // 这是一个WebSocket连接管理类，用于管理所有活跃�
       tokenVersion: Number(tokenVersion),
       isAlive: true,
       connectedAt: Date.now(),
+      /** Client frames currently being processed (bounded — see ws/server.js). */
+      inflight: 0,
     };
 
     if (!this.byUser.has(ws.ctx.userId)) this.byUser.set(ws.ctx.userId, new Set());  // 这是一个检查用户ID是否已经存在于byUser映射中的逻辑，如果不存在则创建一个新的Set来存储该用户的WebSocket连接
@@ -66,6 +69,13 @@ class Hub {  // 这是一个WebSocket连接管理类，用于管理所有活跃�
 
   send(ws, payload) {
     if (ws.readyState !== ws.OPEN) return false;
+    // Backpressure: a client that stops reading would otherwise let `ws` buffer
+    // outbound frames unboundedly. Drop when its send buffer is saturated — the
+    // client recovers the missed frames from its poll cursor on reconnect.
+    if (ws.bufferedAmount > config.ws.maxBufferedBytes) {
+      log.warn(`drop send on ${ws.ctx?.id?.slice(0, 8)}: buffered ${ws.bufferedAmount}B`);
+      return false;
+    }
     try {
       ws.send(JSON.stringify(payload));
       return true;

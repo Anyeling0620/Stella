@@ -6,6 +6,7 @@ const groupRepo = require('../repositories/groupRepo');
 const attachmentRepo = require('../repositories/attachmentRepo');
 const friendService = require('./friendService');
 const groupService = require('./groupService');
+const presenceService = require('./presenceService');
 const userRepo = require('../repositories/userRepo');
 const hub = require('../ws/hub');
 const { SERVER } = require('../ws/protocol');
@@ -155,11 +156,21 @@ async function history({ userId, friendId, beforeId = 0, limit = 50 }) {
 async function groupHistory({ userId, groupId, beforeId = 0, limit = 50 }) {
   const gid = Number(groupId);
   const { group } = await groupService.assertMember(gid, userId);
-  const [members, messages] = await Promise.all([
+  const [roster, messages] = await Promise.all([
     groupRepo.listMembers(gid),
     messageRepo.groupHistory({ groupId: gid, beforeId: Number(beforeId) || 0, limit: Number(limit) || 50 }),
   ]);
-  return { group: groupRepo.toDTO(group), members, messages };
+  // Annotate presence so the thread header can show "N 人在线" from first paint.
+  const members = presenceService.annotate(roster);
+  return {
+    group: {
+      ...groupRepo.toDTO(group),
+      memberCount: members.length,
+      onlineCount: presenceService.countOnline(members),
+    },
+    members,
+    messages,
+  };
 }
 
 /** Incremental cursor sync used by the polling fallback (and WS resume). */

@@ -399,8 +399,9 @@ async function run() {
 
   await check('切换主题：令牌即时生效并在刷新后保持', async () => {
     await page1.bringToFront();
-    await clickTestId(page1, 'profile-open');
-    await page1.waitForSelector('[data-testid="profile-dialog"]', { timeout: 8000 });
+    // Theme lives in Settings (separate from the personal profile).
+    await clickTestId(page1, 'settings-open');
+    await page1.waitForSelector('[data-testid="settings-dialog"]', { timeout: 8000 });
 
     const before = await page1.evaluate(() => getComputedStyle(document.body).backgroundColor);
 
@@ -530,6 +531,9 @@ async function run() {
   console.log('\nCross-tab logout');
   await check('任意窗口退出 → 所有窗口同步下线，连接归零', async () => {
     const before = await connectionCount();
+    // Sign-out lives in Settings now.
+    await clickTestId(page1, 'settings-open');
+    await page1.waitForSelector('[data-testid="settings-dialog"]', { timeout: 8000 });
     await clickTestId(page1, 'signout');
 
     const settle = async (page) => {
@@ -580,8 +584,8 @@ async function run() {
       { timeout: 12000 }
     );
 
-    await clickTestId(page, 'profile-open');
-    await page.waitForSelector('[data-testid="profile-dialog"]', { timeout: 8000 });
+    await clickTestId(page, 'settings-open');
+    await page.waitForSelector('[data-testid="settings-dialog"]', { timeout: 8000 });
     await clickTestId(page, 'host-in-tab');
 
     await page.waitForFunction(

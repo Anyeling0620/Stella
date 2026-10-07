@@ -4,6 +4,7 @@ import { ApiError } from '../lib/axiosClient';
 import { AVATAR_PRESET_IDS } from '../lib/avatarPresets';
 import { useAppActions } from '../context/AppContext';
 import { Avatar } from './Avatar';
+import { PresenceAvatar } from './PresenceAvatar';
 import type { Group, GroupJoinRequest, GroupMember, User } from '../types';
 
 interface GroupInfoDialogProps {
@@ -12,17 +13,31 @@ interface GroupInfoDialogProps {
   members: GroupMember[];
   myId: number;
   frozen: boolean;
+  /** Live presence (user id -> online), owned by ChatShell. */
+  presence: Record<number, boolean>;
   onClose: () => void;
 }
 
+/** Members shown before the grid collapses behind a 「查看全部」 link. */
+const MEMBER_PREVIEW = 12;
+
 /**
- * Group profile + roster management.
+ * Group profile + roster management, laid out as discrete sections
+ * (群资料 / 群公告 / 群管理 / 群成员) instead of one long undifferentiated column.
  *
  * The owner may edit name/avatar/announcement and add/remove members; everyone
  * else sees a read-only view plus "退群". Server pushes keep the open thread in
  * sync, so actions here do not need to mutate parent state directly.
  */
-export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }: GroupInfoDialogProps) {
+export function GroupInfoDialog({
+  open,
+  group,
+  members,
+  myId,
+  frozen,
+  presence,
+  onClose,
+}: GroupInfoDialogProps) {
   const { pushToast } = useAppActions();
   const isOwner = group.ownerId === myId;
 
@@ -33,11 +48,13 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   const [friends, setFriends] = useState<User[]>([]);
   const [toAdd, setToAdd] = useState<Set<number>>(new Set());
   const [confirm, setConfirm] = useState<'leave' | 'dissolve' | null>(null);
   const [joinRequests, setJoinRequests] = useState<GroupJoinRequest[]>([]);
   const [requestsBusy, setRequestsBusy] = useState(false);
+  const [tab, setTab] = useState<'profile' | 'announcement' | 'manage' | 'members'>('profile');
 
   const loadJoinRequests = useCallback(async () => {
     if (group.ownerId !== myId) return;
@@ -59,8 +76,10 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
     setSaving(false);
     setBusy(false);
     setAddOpen(false);
+    setShowAll(false);
     setToAdd(new Set());
     setConfirm(null);
+    setTab('profile');
     setJoinRequests([]);
     // Refresh the roster + pending applications from the source of truth.
     void groupApi
@@ -229,10 +248,15 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
 
   const memberIds = new Set(localMembers.map((m) => m.id));
   const addable = friends.filter((f) => !memberIds.has(f.id));
+  const shownMembers = showAll ? localMembers : localMembers.slice(0, MEMBER_PREVIEW);
+  const onlineCount = localMembers.reduce(
+    (n, member) => n + ((presence[member.id] ?? member.online) ? 1 : 0),
+    0
+  );
 
   return (
     <div className="dialog-overlay" onMouseDown={() => !busy && onClose()} data-testid="group-info-dialog">
-      <div className="dialog" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="dialog dialog-wide" onMouseDown={(e) => e.stopPropagation()}>
         <header className="dialog-head">
           <span className="dialog-title">群信息</span>
           <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
@@ -240,72 +264,117 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
           </button>
         </header>
 
-        <div className="dialog-body">
-          {isOwner ? (
-            <div className="avatar-grid" role="radiogroup" aria-label="群头像">
-              <button
-                type="button"
-                className="avatar-option"
-                data-avatar-id="none"
-                aria-checked={avatar === null}
-                onClick={() => setAvatar(null)}
-              >
-                <Avatar name={group.name} avatar={null} size={46} tone="muted" />
-              </button>
-              {AVATAR_PRESET_IDS.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="avatar-option"
-                  data-testid="group-avatar-option"
-                  data-avatar-id={id}
-                  aria-checked={avatar === id}
-                  onClick={() => setAvatar(id)}
-                >
-                  <Avatar name={group.name} avatar={id} size={46} />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="group-info-avatar">
-              <Avatar name={group.name} avatar={group.avatar} size={64} />
-            </div>
-          )}
-
-          {isOwner ? (
-            <label className="field">
-              <span>群名称</span>
-              <input
-                data-testid="group-info-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                maxLength={64}
-              />
-            </label>
-          ) : (
-            <div className="group-info-name">{group.name}</div>
-          )}
-
-          <div className="group-info-no">
-            <span>群号</span>
-            <code data-testid="group-no">{group.groupNo ?? '—'}</code>
+        <div className="dialog-split">
+          <nav className="dialog-nav" aria-label="群设置分类">
             <button
               type="button"
-              className="btn btn-sm btn-ghost"
-              data-testid="group-no-copy"
-              onClick={() => {
-                void navigator.clipboard?.writeText(String(group.groupNo ?? ''));
-                pushToast({ kind: 'success', title: '群号已复制' });
-              }}
+              className={tab === 'profile' ? 'active' : ''}
+              aria-current={tab === 'profile' ? 'true' : undefined}
+              onClick={() => setTab('profile')}
             >
-              复制
+              群资料
             </button>
-          </div>
+            <button
+              type="button"
+              className={tab === 'announcement' ? 'active' : ''}
+              aria-current={tab === 'announcement' ? 'true' : undefined}
+              onClick={() => setTab('announcement')}
+            >
+              群公告
+            </button>
+            {isOwner && (
+              <button
+                type="button"
+                className={tab === 'manage' ? 'active' : ''}
+                aria-current={tab === 'manage' ? 'true' : undefined}
+                onClick={() => setTab('manage')}
+              >
+                群管理
+                {joinRequests.length > 0 && <span className="badge badge-unread">{joinRequests.length}</span>}
+              </button>
+            )}
+            <button
+              type="button"
+              className={tab === 'members' ? 'active' : ''}
+              aria-current={tab === 'members' ? 'true' : undefined}
+              onClick={() => setTab('members')}
+            >
+              群成员
+            </button>
+          </nav>
 
-          <label className="field">
-            <span>群公告</span>
+          {/* --- 群资料 ------------------------------------------------------ */}
+          <section className="dialog-pane" hidden={tab !== 'profile'}>
+            <h3 className="dialog-section-title">群资料</h3>
+
+            {isOwner ? (
+              <div className="avatar-grid" role="radiogroup" aria-label="群头像">
+                <button
+                  type="button"
+                  className="avatar-option"
+                  data-avatar-id="none"
+                  aria-checked={avatar === null}
+                  onClick={() => setAvatar(null)}
+                >
+                  <Avatar name={group.name} avatar={null} size={46} tone="muted" />
+                </button>
+                {AVATAR_PRESET_IDS.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className="avatar-option"
+                    data-testid="group-avatar-option"
+                    data-avatar-id={id}
+                    aria-checked={avatar === id}
+                    onClick={() => setAvatar(id)}
+                  >
+                    <Avatar name={group.name} avatar={id} size={46} />
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="group-info-avatar">
+                <Avatar name={group.name} avatar={group.avatar} size={64} />
+              </div>
+            )}
+
+            {isOwner ? (
+              <label className="field">
+                <span>群名称</span>
+                <input
+                  data-testid="group-info-name"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  maxLength={64}
+                />
+              </label>
+            ) : (
+              <div className="group-info-name">{group.name}</div>
+            )}
+
+            <div className="group-info-no">
+              <span>群号</span>
+              <code data-testid="group-no">{group.groupNo ?? '—'}</code>
+              <button
+                type="button"
+                className="btn btn-sm btn-ghost"
+                data-testid="group-no-copy"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(String(group.groupNo ?? ''));
+                  pushToast({ kind: 'success', title: '群号已复制' });
+                }}
+              >
+                复制
+              </button>
+            </div>
+          </section>
+
+          {/* --- 群公告 ------------------------------------------------------ */}
+          <section className="dialog-pane" hidden={tab !== 'announcement'}>
+            <h3 className="dialog-section-title">群公告</h3>
             {isOwner ? (
               <textarea
+                className="dialog-textarea"
                 data-testid="group-info-announcement"
                 value={announcement}
                 onChange={(event) => setAnnouncement(event.target.value)}
@@ -316,24 +385,26 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
             ) : (
               <div className="group-info-announcement-text">{group.announcement || '暂无群公告'}</div>
             )}
-          </label>
+          </section>
 
+          {/* --- 群管理（仅群主） -------------------------------------------- */}
           {isOwner && (
-            <div className="panel-section">
-              <div className="panel-title">
-                加群申请
-                {joinRequests.length > 0 && <span className="badge">{joinRequests.length}</span>}
-              </div>
+            <section className="dialog-pane" hidden={tab !== 'manage'}>
+              <h3 className="dialog-section-title">
+                群管理
+                {joinRequests.length > 0 && <span className="badge badge-unread">{joinRequests.length}</span>}
+              </h3>
               {joinRequests.length === 0 && <div className="panel-empty">暂无待处理的加群申请</div>}
-              {joinRequests.map((request) => (
+              <div className="row-stack">
+                {joinRequests.map((request) => (
                 <div
                   key={request.id}
                   className="list-row"
                   data-testid="group-join-request"
                   data-request-id={request.id}
                 >
-                  <Avatar name={request.applicant.nickname} avatar={request.applicant.avatar} size={34} tone="muted" />
-                  <div className="list-row-main">
+                  <Avatar name={request.applicant.nickname} avatar={request.applicant.avatar} size={40} tone="muted" />
+                  <div className="list-row-text">
                     <div className="list-row-title">{request.applicant.nickname}</div>
                     <div className="list-row-sub">{request.message || '申请加入群聊'}</div>
                   </div>
@@ -358,19 +429,22 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
                     </button>
                   </div>
                 </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </section>
           )}
 
-          <div className="panel-section">
-            <div className="panel-title">
-              成员（{localMembers.length}）
+          {/* --- 群成员 ------------------------------------------------------ */}
+          <section className="dialog-pane" hidden={tab !== 'members'}>
+            <h3 className="dialog-section-title">
+              群成员（{localMembers.length}）
+              <span className="member-online-count">{onlineCount} 人在线</span>
               {isOwner && (
                 <button type="button" className="btn btn-sm btn-ghost" onClick={() => void openAdd()}>
                   添加
                 </button>
               )}
-            </div>
+            </h3>
 
             {addOpen && (
               <div className="member-picker" data-testid="group-add-picker">
@@ -413,31 +487,60 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
               </div>
             )}
 
-            {localMembers.map((member) => (
-              <div key={member.id} className="list-row" data-testid="group-member-row" data-user-id={member.id}>
-                <Avatar name={member.nickname} avatar={member.avatar} size={34} tone="muted" />
-                <div className="list-row-main">
-                  <div className="list-row-title">
-                    {member.nickname}
-                    {member.role === 'owner' && <span className="role-marker">群主</span>}
+            <div className="member-grid">
+              {shownMembers.map((member) => (
+                <div
+                  key={member.id}
+                  className="member-tile"
+                  data-testid="group-member-row"
+                  data-user-id={member.id}
+                  title={`@${member.username}`}
+                >
+                  <div className="member-tile-avatar">
+                    <PresenceAvatar
+                      name={member.nickname}
+                      avatar={member.avatar}
+                      size={46}
+                      tone="muted"
+                      online={presence[member.id] ?? Boolean(member.online)}
+                    />
+                    {isOwner && member.id !== myId && (
+                      <button
+                        type="button"
+                        className="member-tile-remove"
+                        data-testid="group-member-remove"
+                        aria-label={`移除 ${member.nickname}`}
+                        disabled={busy}
+                        onClick={() => void removeMember(member)}
+                      >
+                        −
+                      </button>
+                    )}
                   </div>
-                  <div className="list-row-sub">@{member.username}</div>
+                  <span className="member-tile-name">{member.nickname}</span>
+                  {member.role === 'owner' && <span className="member-tile-role">群主</span>}
                 </div>
-                {isOwner && member.id !== myId && (
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    data-testid="group-member-remove"
-                    aria-label="移除成员"
-                    disabled={busy}
-                    onClick={() => void removeMember(member)}
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
+              ))}
+
+              {isOwner && (
+                <button
+                  type="button"
+                  className="member-tile member-tile-add"
+                  onClick={() => void openAdd()}
+                  aria-label="添加成员"
+                >
+                  <span className="member-tile-plus">＋</span>
+                  <span className="member-tile-name">添加</span>
+                </button>
+              )}
+            </div>
+
+            {localMembers.length > MEMBER_PREVIEW && (
+              <button type="button" className="link-btn" onClick={() => setShowAll((v) => !v)}>
+                {showAll ? '收起成员' : `查看全部 ${localMembers.length} 位成员`}
+              </button>
+            )}
+          </section>
         </div>
 
         <footer className="dialog-foot">
@@ -454,7 +557,7 @@ export function GroupInfoDialog({ open, group, members, myId, frozen, onClose }:
           ) : (
             <button
               type="button"
-              className="btn"
+              className="btn btn-danger"
               data-testid="group-leave"
               disabled={busy}
               onClick={() => setConfirm('leave')}

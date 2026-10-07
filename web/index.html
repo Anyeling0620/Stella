@@ -11,7 +11,8 @@
       // to the tokens in `:root`.
       try {
         var storedTheme = localStorage.getItem('stella.im.theme');
-        if (storedTheme) document.documentElement.setAttribute('data-theme', storedTheme);
+        // Default to the WeChat palette so a first visit never flashes the old theme.
+        document.documentElement.setAttribute('data-theme', storedTheme || 'wechat');
       } catch (error) {
         /* storage blocked — keep the default theme */
       }
