@@ -19,13 +19,15 @@ class Hub {  // 这是一个WebSocket连接管理类，用于管理所有活跃�
     this.all = new Set();
   }
 
-  attach(ws, { userId, username, tokenExpAt, tokenVersion = 0 }) { // 这是一个将WebSocket连接附加到Hub的方法，接收WebSocket对象和用户信息作为参数
+  attach(ws, { userId, username, tokenExpAt, tokenVersion = 0, sid = null }) { // 这是一个将WebSocket连接附加到Hub的方法，接收WebSocket对象和用户信息作为参数
     ws.ctx = {  // 这是一个上下文对象，存储了连接的唯一ID、用户ID、用户名、令牌过期时间、令牌版本、连接状态和连接时间
       id: crypto.randomUUID(), 
       userId: Number(userId),
       username,
       tokenExpAt,
       tokenVersion: Number(tokenVersion),
+      /** Login lineage (active-session) this socket belongs to. */
+      sid: sid || null,
       isAlive: true,
       connectedAt: Date.now(),
       /** Client frames currently being processed (bounded — see ws/server.js). */
@@ -110,6 +112,33 @@ class Hub {  // 这是一个WebSocket连接管理类，用于管理所有活跃�
         ws.close(code, reason);
       } catch {
         ws.terminate();
+      }
+    }
+  }
+
+  /** Force-closes the sockets bound to one login lineage (remote device logout). */
+  closeSession(userId, sid, code = 4002, reason = 'session revoked') {
+    if (!sid) return;
+    for (const ws of [...this.connectionsOf(userId)]) {
+      if (ws.ctx && ws.ctx.sid === sid) {
+        try {
+          ws.close(code, reason);
+        } catch {
+          ws.terminate();
+        }
+      }
+    }
+  }
+
+  /** Force-closes every socket of a user except the given lineage (改密 / 登出其他设备). */
+  closeOtherSessions(userId, keepSid, code = 4002, reason = 'other sessions revoked') {
+    for (const ws of [...this.connectionsOf(userId)]) {
+      if (ws.ctx && ws.ctx.sid !== keepSid) {
+        try {
+          ws.close(code, reason);
+        } catch {
+          ws.terminate();
+        }
       }
     }
   }

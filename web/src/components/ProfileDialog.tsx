@@ -20,6 +20,7 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
   const { user } = useAppSession();
   const { updateUser, pushToast } = useAppActions();
   const [nickname, setNickname] = useState('');
+  const [bio, setBio] = useState('');
   const [avatar, setAvatar] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -27,6 +28,7 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
   useEffect(() => {
     if (!open || !user) return;
     setNickname(user.nickname);
+    setBio(user.bio ?? '');
     setAvatar(user.avatar ?? null);
     setSaving(false);
   }, [open, user]);
@@ -46,7 +48,10 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
 
   if (!open || !user) return null;
 
-  const dirty = nickname.trim() !== user.nickname || (avatar ?? null) !== (user.avatar ?? null);
+  const dirty =
+    nickname.trim() !== user.nickname ||
+    (bio.trim() || '') !== (user.bio ?? '') ||
+    (avatar ?? null) !== (user.avatar ?? null);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -59,7 +64,7 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
 
     setSaving(true);
     try {
-      const result = await authApi.updateProfile({ nickname: trimmed, avatar });
+      const result = await authApi.updateProfile({ nickname: trimmed, avatar, bio: bio.trim() || null });
       updateUser(result.user);
       pushToast({ kind: 'success', title: '资料已更新' });
       onClose();
@@ -124,6 +129,17 @@ export function ProfileDialog({ open, onClose }: ProfileDialogProps) {
               onChange={(event) => setNickname(event.target.value)}
               maxLength={64}
               required
+            />
+          </label>
+
+          <label className="field">
+            <span>个性签名</span>
+            <input
+              data-testid="bio-input"
+              value={bio}
+              onChange={(event) => setBio(event.target.value)}
+              maxLength={140}
+              placeholder="介绍一下自己"
             />
           </label>
 

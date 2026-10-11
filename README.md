@@ -2,7 +2,7 @@
 
 基于 **React 18 + TypeScript + SharedWorker** 与 **Node.js + Express + WebSocket + MySQL** 的轻量化 Web 即时通讯系统原型。
 
-全局唯一长连接、握手鉴权、指数退避重连、HTTP 增量轮询降级、多标签抢占单例、跨标签全局登出、双源消息加载、企业级 Axios 请求治理、完整好友与双向聊天闭环。
+全局唯一长连接、握手鉴权、指数退避重连、HTTP 增量轮询降级、多标签抢占单例、跨标签全局登出、双源消息加载、企业级 Axios 请求治理、完整好友与双向聊天闭环、群聊与群管理、消息撤回/转发/引用/置顶/免打扰/搜索/收藏、语音消息、账号与隐私安全基线（HttpOnly Cookie + CSRF + CSP + 限流）、Web Push 离线推送、PWA 与本地缓存。
 
 ---
 
@@ -48,7 +48,10 @@ pnpm dev:web                # 前端，默认 http://localhost:5173
 - 后端：复制 `server/.env.example` 为 `server/.env`
 - 前端：复制 `web/.env.example` 为 `web/.env.local`
 
-关键变量：`DB_PORT`、`DB_PASSWORD`、`DB_NAME`、`PORT`、`CORS_ORIGINS`、`SYSTEM_NOTICE_MS`、`VITE_API_BASE`。
+关键变量：`DB_PORT`、`DB_PASSWORD`、`DB_NAME`、`PORT`、`CORS_ORIGINS`、`SYSTEM_NOTICE_MS`、`VITE_API_BASE`、`VITE_API_PROXY_TARGET`。
+
+> **安全 / 通知相关**：`COOKIE_SECURE`（生产置 `true`）、`VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT`（Web Push；不设则开发启动时自动生成临时密钥）、`PUSH_ENABLED`、`RATE_LIMIT_DISABLED`（仅测试）、`CONTENT_FILTER_WORDS`。
+> **开发同源**：前端默认 `API.base` 为空，由 Vite 代理 `/api` 与 `/ws` 到后端（`VITE_API_PROXY_TARGET`，默认 `http://127.0.0.1:3001`），使 `SameSite=Lax` 的 refresh Cookie 生效。**若你的 dev server 是在本次改动前启动的，请重启 `pnpm dev`。**
 
 ### pnpm 相关说明
 
@@ -74,29 +77,39 @@ im/
 │   └── src/
 │       ├── index.js               # 应用装配（HTTP + WS + 定时任务 + 优雅退出）
 │       ├── config.js              # 集中配置（全部带安全默认值）
-│       ├── db/                    # 连接池 + 幂等建库建表
+│       ├── db/                    # 连接池 + 幂等建库建表 / 建表迁移 / 枚举升级
 │       ├── repositories/          # 数据访问层（纯 SQL，可独立替换）
-│       ├── services/              # 业务逻辑层（鉴权/好友/消息/公告）
-│       ├── routes/                # HTTP 接口层
-│       ├── middleware/            # 鉴权守卫 + 统一错误处理
+│       │   ├── userRepo / tokenRepo / sessionRepo
+│       │   ├── friendRepo / blockRepo / inviteLinkRepo / userSettingsRepo
+│       │   ├── messageRepo / conversationRepo / favoriteRepo
+│       │   ├── groupRepo / attachmentRepo / noticeRepo / pushRepo
+│       ├── services/              # 业务逻辑层（鉴权/好友/消息/群/公告/推送/风控）
+│       ├── routes/                # HTTP 接口层（含 conversations/favorites/push/reports/settings）
+│       ├── middleware/            # auth / csrf / rateLimit / securityHeaders / error
 │       ├── ws/                    # 握手鉴权 / 连接中心 / 心跳 / 持续校验
+│       ├── utils/                 # jwt / cookies / origin / logger（含脱敏）
 │       └── jobs/                  # 2 分钟系统公告广播
-│   └── test/e2e.js                # 后端集成测试（31 项）
+│   └── test/e2e.js                # 后端集成测试（97 项）
 └── web/                           # 前端：React18 + TS + Vite
     ├── public/
     │   ├── realtime-engine.js     # 与宿主无关的 WS 状态机（重连/降级/自愈）
-    │   └── ws-worker.js           # SharedWorker：全局唯一连接 + 标签页广播 + 抢占
+    │   ├── realtime-worker.js     # SharedWorker：全局唯一连接 + 标签页广播 + 抢占
+    │   ├── sw.js                  # Service Worker：Web Push 展示 + 离线外壳缓存
+    │   └── manifest.webmanifest   # PWA 清单
     ├── src/
     │   ├── lib/                   # 能力中台（无 UI 依赖）
-    │   │   ├── axiosClient.ts     # Axios 请求治理
-    │   │   ├── session.ts         # 会话管理 + 跨标签登出
+    │   │   ├── axiosClient.ts     # Axios 请求治理（含 Cookie/CSRF）
+    │   │   ├── session.ts         # 会话管理（access 仅内存）+ 跨标签登出
     │   │   ├── realtime.ts        # 实时层门面（SharedWorker / 页内降级）
     │   │   ├── bus.ts             # 跨页总线（BroadcastChannel → StorageEvent）
+    │   │   ├── push.ts            # Web Push 订阅
+    │   │   ├── idb.ts             # IndexedDB 缓存 + storage.estimate
+    │   │   ├── theme.ts / transport.ts / storage.ts / conversation.ts
     │   │   └── api.ts             # 类型化接口
     │   ├── context/AppContext.tsx # 全局能力层（只存能力，不存业务数据）
     │   ├── pages/                 # 登录页 / 应用外壳 / 好友 / 聊天窗口
-    │   └── components/            # Toast / 冻结遮罩 / 状态标识 / 头像
-    └── test/                      # 引擎测试（5 项）+ 浏览器 E2E（12 项）
+    │   └── components/            # Toast / 冻结遮罩 / 设置 / 群信息 / 资料 / 头像
+    └── test/                      # 引擎测试（8 项）+ 治理（4 项）+ 浏览器 E2E（17 项）
 ```
 
 ---
@@ -128,15 +141,15 @@ im/
 
 ### 1. 全局唯一 WebSocket 长连接（SharedWorker）
 
-- `web/public/ws-worker.js`：浏览器内**唯一**的 WS 持有者，所有标签页通过 `MessagePort` 接入。
+- `web/public/realtime-worker.js`：浏览器内**唯一**的 WS 持有者，所有标签页通过 `MessagePort` 接入。
 - 多标签实测：打开第二个标签后 `/api/health` 的 `connections` 仍为 `1`（见浏览器 E2E）。
 - 不支持 SharedWorker 时，`realtime.ts` 自动切换「页内降级」：经总线选出**唯一 leader 标签**持有连接，其余标签接收转发帧。
 
 ### 2. WebSocket 握手鉴权
 
 - 前端：无有效 Token 时引擎**直接不发起握手**（`getToken()` 返回空 → 状态 `idle` + 请求令牌）。
-- 后端：`ws/server.js` 接管 `upgrade` 事件，未通过 JWT 校验（缺失/无效/过期/`token_version` 不匹配）时**写入 HTTP 401 并销毁 socket**，协议升级永不完成。
-- 连接持续鉴权：后端定时（默认 60s）复核每个在线连接的 Token 有效期与 `token_version`，失效主动断开（关闭码 `4001` 过期 / `4002` 会话被吊销）。
+- 后端：`ws/server.js` 接管 `upgrade` 事件，未通过 JWT 校验（缺失/无效/过期/`token_version` 不匹配/**设备会话已吊销**）时**写入 HTTP 401 并销毁 socket**，协议升级永不完成；同时校验 `Origin` 白名单（非生产放行 localhost 任意端口）。
+- 连接持续鉴权：后端定时（默认 60s）复核每个在线连接的 Token 有效期、`token_version` 与**设备会话（`sid`）状态**，失效主动断开（关闭码 `4001` 过期 / `4002` 会话被吊销）。
 
 ### 3. 断线重连：指数退避 + 随机抖动
 
@@ -217,37 +230,104 @@ im/
 
 页面数据局部化、卸载即销毁；订阅在 `useEffect` 清理函数中退订；定时器统一回收。
 
+### 13. 清单补齐（P1–P4）
+
+在原有能力之上，按《精简功能清单》补齐了四个阶段：
+
+**P1 · 账号 / 隐私 / 安全基线**
+- 账号：修改密码（改密后吊销其他会话）、活跃会话管理（列表 / 远程登出 / 登出其他设备）、注销 + 7 天冷静期找回、登录失败锁定（5 次 / 15 分钟）、记住我。
+- 隐私与关系链：添加我的方式（用户名 / 邀请链接 / 群聊）、加好友需验证开关、黑名单、好友备注（仅本地）、邀请链接、好友上限 2000、个性签名。
+- 风控与合规：注册 / 登录 / 加好友 / 发消息 / 建群限流、违规词拦截、举报（含回执）、禁言 / 封禁处置、审计日志、日志 PII 脱敏。
+- 安全基线：refresh token 改为 **HttpOnly Cookie**、access token **仅存内存**、**CSRF** 双提交、安全响应头（CSP / X-Frame-Options / Referrer-Policy / Permissions-Policy）、CORS 凭据、WS 握手 Origin 校验。
+- 开发同源：Vite 代理 `/api` `/ws`，使 `SameSite=Lax` Cookie 生效。
+
+**P2 · 消息与会话**
+- 撤回（2 分钟，双方转为系统提示）、引用回复、逐条转发、删除（本地）、清空会话、置顶（上限 10）、免打扰、会话内搜索、消息收藏。
+- 群聊：群昵称、管理员（群主任命）、入群确认开关、群文件。
+- 体验：消息右键菜单、签名与草稿、输入 2000 字上限、链接自动识别（`rel="noopener noreferrer"`）。
+
+**P3 · 通知 / 多端 / 数据**
+- Web Push（离线推送，尊重免打扰与桌面通知开关、点击回到会话）、标签页标题未读角标 + favicon 徽标、提示音、桌面通知（用户手势后申请权限）。
+- IndexedDB 本地缓存（首屏加速）、PWA 清单 + Service Worker 离线外壳、按会话导出聊天记录、存储占用查看与清理。
+
+**P4 · 多媒体与打磨**
+- 语音消息（MediaRecorder 录制 / 上传 / 播放）、青少年模式（关闭陌生人添加）、隐私政策说明。
+
 ---
 
 ## 五、HTTP / WebSocket 接口
 
 ### HTTP
 
-| 方法 | 路径                              | 说明                                     |
-| ---- | --------------------------------- | ---------------------------------------- |
-| GET  | `/api/health`                     | 健康检查（含在线用户数、连接数）         |
-| POST | `/api/auth/register`              | 注册（返回 access/refresh + 用户信息）   |
-| POST | `/api/auth/login`                 | 登录                                     |
-| POST | `/api/auth/refresh`               | 刷新（**单次使用、轮换**）               |
-| POST | `/api/auth/logout`                | 登出（吊销全部令牌 + 断开所有连接）      |
-| GET  | `/api/auth/me`                    | 当前用户                                 |
-| PATCH| `/api/auth/me`                    | 修改资料：`nickname` / `avatar`（头像为预设 ID，`null` 表示清空） |
-| GET  | `/api/friends`                    | 好友列表                                 |
-| GET  | `/api/friends/search?q=`          | 搜索用户                                 |
-| GET  | `/api/friends/requests`           | 待处理好友申请                           |
-| POST | `/api/friends/requests`           | 发起申请：`201 {outcome:"requested",request}`；若对方已申请过你则 `200 {outcome:"auto-accepted",friend}` |
-| POST | `/api/friends/requests/:id/accept`| 同意（`:action` 亦可为 `reject`）        |
-| DELETE| `/api/friends/:friendId`         | **单向**移除好友（仅删我这一行；幂等，返回 `removed:boolean`） |
-| GET  | `/api/messages/history`           | 历史消息（`friendId`/`beforeId`/`limit`）|
-| GET  | `/api/messages/poll`              | 增量轮询（`sinceId`/`noticeSinceId`）    |
-| POST | `/api/messages`                   | HTTP 发送（WS 不可用时的等价路径）       |
-| POST | `/api/messages/read`              | 已读回执                                 |
-| GET  | `/api/system/notices`             | 公告增量拉取                             |
+> 鉴权：除登录/注册/刷新/恢复外均需 `Authorization: Bearer <accessToken>`。登录/注册/刷新/恢复的 **refresh token 通过 `Set-Cookie: stella_rt`（HttpOnly）下发**，请求体不再返回；`/api/auth/refresh` 需带 `X-CSRF-Token`（值等于非 HttpOnly 的 `stella_csrf` Cookie）。
+
+| 方法 | 路径 | 说明 |
+| ---- | ---- | ---- |
+| GET  | `/api/health` | 健康检查（含在线用户数、连接数） |
+| POST | `/api/auth/register` | 注册（返回 accessToken + 用户） |
+| POST | `/api/auth/login` | 登录（支持 `rememberMe`） |
+| POST | `/api/auth/refresh` | 刷新（单次轮换；Cookie + CSRF） |
+| POST | `/api/auth/restore` | 冷静期内恢复已注销账号 |
+| POST | `/api/auth/logout` | 登出（吊销全部令牌 + 断开连接） |
+| GET  | `/api/auth/me` | 当前用户 |
+| PATCH| `/api/auth/me` | 修改资料：`nickname` / `avatar` / `bio` |
+| DELETE| `/api/auth/me` | 注销账号（软删 + 冷静期，需密码） |
+| POST | `/api/auth/password` | 修改密码（吊销其他会话） |
+| GET  | `/api/auth/sessions` | 活跃会话（设备）列表 |
+| DELETE| `/api/auth/sessions/:id` | 远程登出该设备 |
+| POST | `/api/auth/sessions/revoke-others` | 登出其他所有设备 |
+| GET / PATCH | `/api/settings` | 隐私与通知开关 |
+| GET  | `/api/friends` | 好友列表（含 `remark`） |
+| GET  | `/api/friends/search?q=` | 搜索用户（受添加方式开关约束） |
+| GET  | `/api/friends/requests` | 待处理好友申请 |
+| POST | `/api/friends/requests` | 发起申请：`{toUserId}`，或 `{token}` 走邀请链接 |
+| POST | `/api/friends/requests/:id/accept` | 同意（`:action` 亦可为 `reject`） |
+| PATCH| `/api/friends/:friendId` | 设置好友备注（仅本地可见） |
+| DELETE| `/api/friends/:friendId` | **单向**移除好友 |
+| GET / POST | `/api/friends/blocks` | 黑名单列表 / 拉黑 |
+| DELETE| `/api/friends/blocks/:id` | 移出黑名单 |
+| GET / POST | `/api/friends/invite-links` | 邀请链接列表 / 生成 |
+| DELETE| `/api/friends/invite-links/:token` | 使邀请链接失效 |
+| GET  | `/api/messages/history` | 历史消息（`friendId`/`beforeId`/`limit`） |
+| GET  | `/api/messages/search` | 会话内搜索（`friendId` 或 `groupId` + `q`） |
+| GET  | `/api/messages/poll` | 增量轮询（`sinceId`/`noticeSinceId`） |
+| POST | `/api/messages` | 发送（可带 `quoteId` / `attachmentId`） |
+| POST | `/api/messages/:id/recall` | 撤回（限 2 分钟） |
+| POST | `/api/messages/:id/forward` | 逐条转发 |
+| DELETE| `/api/messages/:id` | 本地删除（仅我可见） |
+| POST | `/api/messages/conversation/clear` | 清空会话 |
+| POST | `/api/messages/read` | 已读回执 |
+| GET  | `/api/conversations` | 置顶 / 免打扰设置列表 |
+| PATCH| `/api/conversations/:peerKind/:peerId` | 置顶 / 免打扰 |
+| POST | `/api/conversations/:peerKind/:peerId/clear` | 清空该会话 |
+| GET / POST | `/api/favorites` | 收藏列表 / 收藏消息 |
+| DELETE| `/api/favorites/:id` | 删除收藏 |
+| POST | `/api/reports` | 举报 |
+| GET  | `/api/reports/mine` | 我的举报回执 |
+| GET  | `/api/push/public-key` | VAPID 公钥 + 是否启用 |
+| POST | `/api/push/subscribe` · `/unsubscribe` | 订阅 / 退订 Web Push |
+| GET / POST | `/api/groups` | 我的群 / 建群 |
+| GET  | `/api/groups/search?q=` | 按群号或群名查找 |
+| GET / PATCH / DELETE | `/api/groups/:id` | 群详情 / 改资料（`joinApproval` 等）/ 解散 |
+| GET  | `/api/groups/:id/messages` | 群历史 |
+| POST | `/api/groups/:id/members` | 添加成员 |
+| DELETE| `/api/groups/:id/members/:userId` | 移除成员 |
+| PATCH| `/api/groups/:id/members/me` | 设置我的群昵称 |
+| PATCH| `/api/groups/:id/members/:userId/role` | 任命 / 取消管理员 |
+| GET  | `/api/groups/:id/files` | 群文件 |
+| POST | `/api/groups/:id/read` | 推进我的群已读游标 |
+| POST | `/api/groups/:id/join-requests` | 申请入群（开放群直接入群） |
+| GET / POST | `/api/groups/:id/join-requests[/:requestId/:action]` | 查看 / 审批入群申请 |
+| POST | `/api/groups/:id/leave` | 退群（群主退群即解散） |
+| POST | `/api/attachments` | 上传（字段 `file`，可选 `kind=voice`） |
+| GET  | `/api/attachments/:id/raw?token=` | 附件字节流 |
+| GET  | `/api/system/notices` | 公告增量拉取 |
 
 ### WebSocket（`ws://host:3001/ws?token=<accessToken>`）
 
-上行：`ping`、`auth:refresh`、`chat:send`、`message:read`
-下行：`ready`、`pong`、`chat:message`、`chat:status`、`chat:error`、`friend:request`、`friend:accepted`、`friend:removed`、`profile:updated`、`notice:system`、`session:invalid`
+上行：`ping`、`auth:refresh`、`chat:send`、`chat:recall`、`message:read`
+
+下行：`ready`、`pong`、`chat:message`、`chat:status`、`chat:error`、`chat:recalled`、`conversation:updated`、`favorite:updated`、`friend:request`、`friend:accepted`、`friend:removed`、`profile:updated`、`presence`、`notice:system`、`session:invalid`、`group:created`、`group:updated`、`group:member_added`、`group:member_removed`、`group:member_left`、`group:member_updated`、`group:dissolved`、`group:join_requested`、`group:join_result`
 
 应用层关闭码：`4001` Token 过期（可续期重连）、`4002` 会话被吊销（必须重新登录）、`4004` 被替换。
 
@@ -255,60 +335,78 @@ im/
 
 ## 六、数据模型（MySQL / `stella_im`）
 
-| 表                | 关键设计                                                              |
-| ----------------- | --------------------------------------------------------------------- |
-| `users`           | `token_version` 支持「一登出即全体失效」                              |
-| `refresh_tokens`  | 仅存 `sha256` 摘要 + `jti`，支持**轮换式单次使用**与重用检测          |
-| `friendships`     | 双向两行 + 唯一索引，读「我的好友」为单次索引扫描                     |
-| `friend_requests` | `(from,to)` 唯一键 + upsert，拒绝后可再次申请                         |
-| `messages`        | 自增 `id` 兼作增量游标；`client_msg_id` 唯一键保证发送**幂等**        |
-| `system_notices`  | 公告落库，轮询降级链路亦可获取                                        |
+库表在服务端启动时幂等创建；新增列 / 枚举升级走 `information_schema` 守卫的迁移（见 `db/init.js` 的 `MIGRATIONS` / `INDEX_MIGRATIONS` / `ALTERS`）。
+
+| 表 | 关键设计 |
+| -- | -------- |
+| `users` | `token_version` 支持「一登出即全体失效」；`bio` / `muted_until` / `banned` / `deleted_at`（注销冷静期） |
+| `sessions` | 登录谱系：`session_id` / `current_jti` / UA / IP，支持**按设备**吊销（活跃会话管理） |
+| `refresh_tokens` | 仅存 `sha256` 摘要 + `jti` + `session_id`；轮换式单次使用 + 重用检测 + 30s 宽限 lineage（并发刷新不误杀） |
+| `friendships` | 双向两行 + 唯一索引；`remark` 私密备注 |
+| `friend_requests` | `(from,to)` 唯一键 + upsert，拒绝后可再次申请 |
+| `blocks` | 有向黑名单，消息闸门对称判黑 |
+| `friend_invite_links` | 邀请链接（token / 有效期 / 失效） |
+| `user_settings` | 隐私（添加方式 / 验证）与通知（桌面 / 声音 / 内容）开关 |
+| `messages` | 自增 `id` 兼作增量游标；`client_msg_id` 唯一键保证幂等；`group_id` / `type` / `mention_user_ids` / `attachment_id`；P2 增 `recalled_at` / `quote_id` |
+| `conversation_settings` | 每用户每会话的 `pinned` / `muted` / `cleared_before_id`（清空水位） |
+| `message_hidden` | 单条消息的本地删除（仅我不可见） |
+| `favorites` | 收藏**快照**（原消息撤回后仍可读） |
+| `groups` | `group_no` 群号、`announcement`、`join_approval` 入群确认 |
+| `group_members` | `role` ∈ `owner`/`admin`/`member`、`nickname` 群昵称、`last_read_message_id` 已读游标 |
+| `group_join_requests` | 入群申请（`(group,user)` 唯一 + upsert） |
+| `attachments` | 上传元数据；`kind` ∈ `image`/`file`/`voice` |
+| `reports` | 举报与状态 |
+| `audit_logs` | 敏感操作审计（最小必要） |
+| `push_subscriptions` | Web Push 订阅（endpoint 唯一） |
+| `system_notices` | 公告落库，轮询降级链路亦可获取 |
 
 ---
 
 ## 七、界面与交互
 
-### 视觉：粗野主义（Brutalism）
+### 视觉：微信风格
 
-深色 + 硬边框 + 单一强调色，所有颜色收敛在 `:root` 令牌里（没有任何颜色写死在组件内）：
+界面采用微信式视觉语言（绿色 `#07C160` 品牌色、带小尖角的圆角气泡、72px 左侧 Rail、微信浅/深色）。所有颜色仍然收敛在 `:root` 令牌里（组件内不写死颜色），令牌随主题切换：
 
-| 令牌 | 值 | 用途 |
-| ---- | -- | ---- |
-| `--bg` / `--surface` / `--surface-2` | `#0b0b0b` / `#141414` / `#1c1c1c` | 页面 / 侧栏与卡片 / 次级面板 |
-| `--border` / `--text` | `#f5f5f5` | 3px 硬边框与正文 |
-| `--accent` | `#ffe600` | **唯一强调色**（我的气泡、主按钮、选中态、焦点环） |
+| 令牌 | 用途 |
+| ---- | ---- |
+| `--bg` / `--surface` / `--surface-2` | 页面 / 侧栏与卡片 / 次级面板 |
+| `--border` / `--text` / `--text-2` | 边框 / 正文 / 次要文字 |
+| `--brand`（回退 `--accent`） | 强调色（我的气泡、主按钮、选中态） |
+| `--bubble-tail` | 气泡小尖角（主题可选开关） |
 
-规则：零圆角、零渐变、零模糊阴影；卡片与弹层用硬投影 `4px 4px 0`；按钮 hover 反色、按下位移 2px 并收掉投影（物理按压感）；时间戳 / 用户名 / 状态等机器生成信息统一等宽字体；头像为**方形 + 2px 白边**。保留 `prefers-reduced-motion` 全量降级与 `:focus-visible` 焦点环。
+规则：圆角气泡、低对比分隔线、头像圆形；保留 `prefers-reduced-motion` 全量降级与 `:focus-visible` 焦点环。
 
 ### 头像：内置几何预设
 
 不引入任何上传/静态服务：`users.avatar` 只存一个短 ID（服务端白名单 `server/src/constants/avatars.js` 的 `p01`–`p12`，非法值一律 400 `INVALID_AVATAR`），图形由 `web/src/lib/avatarPresets.tsx` 用内联 SVG 绘制，取色走 `--avatar-*` 令牌。未设置头像时回退为首字母方块。改头像/昵称后经 `profile:updated` 推送给自己所有标签与全部好友，无需刷新。
 
-### 主题：7 套粗野主义配色
+### 主题：多套配色
 
-主题只是**一组 CSS 变量**，切换就是在 `<html>` 上改一个 `data-theme` 属性 —— 不触发任何 React 重渲染。全部 7 套共用同一套结构，只换色：
+主题只是**一组 CSS 变量**，切换就是在 `<html>` 上改一个 `data-theme` 属性 —— 不触发任何 React 重渲染。默认微信风格，并保留多套外观：
 
-| id | 观感 | 强调色 |
-| -- | ---- | ------ |
-| `acid`（默认） | 近黑 + 白 + 酸性黄 | `#ffe600` |
-| `cyan` / `lime` / `magenta` / `ember` | 各自主色调的近黑底 | 青 / 荧光绿 / 洋红 / 橙 |
-| `blueprint` | 深蓝图纸感 | `#4d8bff` |
-| `paper` | **浅色**：骨白纸 + 纯黑硬边 | `#ffd400` |
+| id | 观感 |
+| -- | ---- |
+| `wechat`（默认） | 微信浅色：白底 + 绿 `#07C160` |
+| `wechat-dark` | 微信深色 |
+| `apple` / `apple-dark` | iOS 观感：系统蓝 + iMessage 气泡 + 玻璃材质 |
+| `acid` / `cyan` / `lime` / `magenta` / `ember` / `blueprint` / `paper` | 早期粗野主义配色（保留） |
 
 做法上有两个关键点：
 
 - **`--accent` 与 `--on-accent` 拆开**：强调色既被当作填充（我的气泡、主按钮，压黑字），也被当作文字（链接、告警）。把「填充上的文字色」独立成 `--on-accent` 后，浅色主题才能既保留高饱和强调色又不丢对比度。另有一个 `--accent-ink` 专门用于「强调色当文字」的场景。
-- **头像预设跟着主题走**：SVG 取色走 `--avatar-*`，所以 `paper` 下自动变成黑图案白底，无需第二套素材。
+- **头像预设跟着主题走**：SVG 取色走 `--avatar-*`，所以浅色主题下自动变成深色图案浅底，无需第二套素材。
 
-主题是**设备本地偏好**（`localStorage: stella.im.theme`），不上传服务端。`index.html` 里有一段内联脚本在首次绘制前套用存储的主题，刷新不会闪一下默认配色。
+主题是**设备本地偏好**（`localStorage: stella.im.theme`），不上传服务端。`index.html` 里有一段内联脚本在首次绘制前套用存储的主题，刷新不会闪一下默认配色。Rail 底部的日/夜开关按 `THEME_PAIRS`（`lib/theme.ts`）在**同一族**内切换。
 
 ### 响应式：手机上单屏单面板
 
 | 断点 | 行为 |
 | ---- | ---- |
-| `> 900px` | 双栏：330px 侧栏 + 内容区 |
-| `≤ 900px` | 双栏保留，侧栏收窄到 262px（平板/小笔记本不再压缩内容区） |
-| `≤ 640px` | **单屏单面板**：由全局 `activeConversationId` 决定显示侧栏还是聊天面板（`.shell.conv-open`），聊天面板顶部出现返回键；触控目标强制 ≥44px；Toast 移到顶部避免遮挡输入框；输入区使用 `env(safe-area-inset-bottom)` 适配全面屏 |
+| `> 1024px` | 双栏：`72px` Rail + 可拖拽侧栏（默认 392px）+ 内容区（最小 480px） |
+| `768–1024px` | 双栏保留，内容区最小宽度降到 360px（平板/小笔记本不再压缩内容） |
+| `≤ 768px` | 隐藏拖拽分割线；触控目标放大 |
+| `≤ 640px` | **单屏单面板**：由全局 `activeConversationId` 决定显示侧栏还是聊天面板（`.shell.conv-open`），聊天面板顶部出现返回键；Toast 移到顶部避免遮挡输入框；输入区使用 `env(safe-area-inset-bottom)` 适配全面屏 |
 
 ### 文案
 
@@ -367,19 +465,20 @@ pnpm visual        # 渲染 1440 / 768 / 375 三档（含主题）并输出 PNG 
 
 ## 八、测试与验证
 
-四套自动化测试，共 **84 项断言**，全部通过。
+四套自动化测试。
 
 ```bash
-# 后端集成测试（自启独立端口的服务进程：鉴权/好友/消息/令牌轮换/公告/参数校验/资料修改/单向删除）
-pnpm test:server             # 57 passed
+# 后端集成测试（自启独立端口的服务进程：鉴权/会话/好友/消息/令牌轮换/单向删除/撤回收发/群管理/
+# 推送订阅/隐私开关/拉黑/内容过滤/举报/注销恢复/审计 等）
+pnpm test:server             # 97 passed（另有 2 项为仓库既有 WIP 的公告文案断言失败，与本次无关）
 
 # 实时引擎测试：鉴权门禁、退避序列、单连接不变量、降级轮询、断网恢复、会话吊销
-pnpm test:engine             # 6 passed
+pnpm test:engine             # 8 passed
 
 # 无需浏览器的两项可一次跑完
 pnpm test
 
-# Axios 请求治理（真实浏览器 + 网络拦截：401 单飞续期 / 5xx 重试 / 4xx 不重试 / 写请求去重）
+# Axios 请求治理（真实浏览器 + 网络拦截：Cookie 续期 / 5xx 重试 / 4xx 不重试 / 写请求去重）
 pnpm test:governance         # 4 passed   （需先 pnpm dev）
 
 # 真实浏览器 E2E（Chrome/Edge headless）
@@ -392,13 +491,13 @@ pnpm test:browser            # 17 passed
 > `node server/test/e2e.js`、`node web/test/engine.e2e.mjs`、
 > `node web/test/governance.e2e.mjs`、`node web/test/browser.e2e.mjs`。
 
+> 后端集成测试的 harness 已适配新的鉴权：使用 **Cookie jar** 走 refresh，断言「有 accessToken、无 refreshToken、有 Set-Cookie」，并注入 `RATE_LIMIT_DISABLED=1` / `REFRESH_GRACE_MS=0` / `CONTENT_FILTER_WORDS`。
+
 > 浏览器 E2E 中的「系统公告」断言需要后端在等待窗口内广播公告。
-> 建议以 `SYSTEM_NOTICE_MS=5000` 启动后端；若使用默认 120s，该项会打印 skip 提示并自动跳过（其余 13 项不受影响）。
+> 建议以 `SYSTEM_NOTICE_MS=5000` 启动后端；若使用默认 120s，该项会打印 skip 提示并自动跳过。
 
 > `test:governance` 直接对着**你正在运行的服务**跑（默认 `http://localhost:5173` + `:3001`）：
-> 通过请求拦截注入 500/400，并用 `JWT_ACCESS_SECRET`（默认与后端一致）伪造一个
-> 「已过期但签名有效」的 access token 来触发 401。可用 `E2E_APP` / `E2E_API` / `JWT_ACCESS_SECRET` 覆盖。
-> 注意：伪造响应必须携带 CORS 头，否则浏览器会拦截响应、让 axios 看到网络错误而不是真实状态码。
+> 通过**真实 UI 登录**（refresh token 在 HttpOnly Cookie 中），再用请求拦截把某次读取注入 401 来触发静默续期，验证「续期一次并重放、不登出」。可用 `E2E_APP` / `E2E_API` 覆盖。
 
 ### 浏览器 E2E 覆盖的实际场景
 
@@ -426,7 +525,7 @@ pnpm test:browser            # 17 passed
 
 ### Axios 治理测试覆盖的实际场景（`test:governance`）
 
-1. **401 无感续期**：伪造「签名有效但已过期」的 access token → 启动时多个并发 401 **只触发一次** `/api/auth/refresh`（拦截器把刷新请求挂起 800ms，强制其余 401 进入等待队列）→ 请求被重放成功、令牌被轮换、不会误登出
+1. **401 无感续期**：真实登录（refresh 在 HttpOnly Cookie）→ 重载后内存令牌丢失 → 应用从 Cookie 静默续期一次，并重放被注入 401 的读取；断言未登出、Cookie 已轮换、且 access token **未**写入 localStorage
 2. **5xx 自动重试**：注入一次 500 → 请求次数精确等于 `基线 + 1`（先测出含 React StrictMode 双挂载的基线，再断言「只多一次」）
 3. **4xx 不重试**：全部注入 400 → 请求次数**等于基线**（零重试），且错误被抛到业务层并弹出提示
 4. **写请求去重**：同一帧内双击「添加好友」→ 只发出一次 `POST /api/friends/requests`
@@ -472,7 +571,10 @@ pnpm demo                       # 或 pnpm -C web demo / node web/test/demo-brow
 
 ## 十、已知边界
 
-- 附件/图片、群聊、消息撤回等未在文档范围内，未实现。
-- Token 通过查询串传递（浏览器无法为 WS 握手设置自定义请求头），后端同时兼容 `Authorization: Bearer` 头，便于非浏览器客户端接入。
-- 单机内存态连接中心（`ws/hub.js`）：多实例部署需引入 Redis 等做跨进程广播，当前为单实例原型定位。
+- **部署**：生产需自行配置 HTTPS 与静态托管（代码已就绪：CSP、HttpOnly + Secure Cookie、Service Worker / Web Push 均要求安全上下文）。开发环境通过 Vite 代理实现前后端同源，使 `SameSite=Lax` Cookie 生效。
+- **Web Push**：未配置 `VAPID_*` 时开发启动会生成临时密钥，**重启后已订阅设备失效**；生产请固定密钥。iOS 需 16.4+ 且「添加到主屏幕」才支持。
+- **表情**：一期仅系统 emoji（表情包后置）。
+- **Token 传递**：WS 握手与附件 `<img>`/下载通过查询串 `?token=` 传 access token（浏览器无法为其设置自定义请求头），后端同时兼容 `Authorization: Bearer`，便于非浏览器客户端接入。
+- **单机内存态连接中心**（`ws/hub.js`）：多实例部署需引入 Redis 等做跨进程广播，当前为单实例原型定位。
+- **本地缓存非权威**：IndexedDB 仅用于首屏加速，可能被浏览器自动清理；聊天记录以服务端漫游为准。
 - 页内降级模式仅在不支持 SharedWorker 的环境生效，用于保证「业务完全可用」。

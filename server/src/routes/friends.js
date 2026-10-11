@@ -3,11 +3,15 @@
 const express = require('express');
 const friendService = require('../services/friendService');
 const { requireAuth } = require('../middleware/auth');
+const { rateLimit } = require('../middleware/rateLimit');
 const { asyncHandler } = require('../utils/errors');
 
 const router = express.Router();
 
 router.use(requireAuth);
+
+/** Anti-骚扰 throttle: 30 friend requests per minute per user. */
+const requestLimit = rateLimit({ name: 'friend', windowMs: 60 * 1000, max: 30, keyBy: (req) => req.userId });
 
 /** GET /api/friends — my friend list */
 router.get(
@@ -36,17 +40,24 @@ router.get(
   })
 );
 
-/** POST /api/friends/requests { toUserId, message } */
+/** POST /api/friends/requests { toUserId, message } — or { token } via invite link */
 router.post(
   '/requests',
+  requestLimit,
   asyncHandler(async (req, res) => {
-    const result = await friendService.sendRequest({
-      fromUserId: req.userId,
-      toUserId: req.body && req.body.toUserId,
-      message: req.body && req.body.message,
-    });
-    // 201 when a pending request was created, 200 when an inbound pending
-    // request was auto-accepted instead (no new resource was created).
+    const body = req.body || {};
+    const result = body.token
+      ? await friendService.sendRequestByInvite({
+          fromUserId: req.userId,
+          token: body.token,
+          message: body.message,
+        })
+      : await friendService.sendRequest({
+          fromUserId: req.userId,
+          toUserId: body.toUserId,
+          message: body.message,
+        });
+    // 201 when a pending request was created, 200 when it was auto-accepted.
     const status = result.outcome === 'auto-accepted' ? 200 : 201;
     res.status(status).json({ ok: true, data: result });
   })
@@ -60,6 +71,66 @@ router.post(
       userId: req.userId,
       requestId: Number(req.params.id),
       action: req.params.action,
+    });
+    res.json({ ok: true, data: result });
+  })
+);
+
+// --- Blocks (拉黑) — declared before the `/:friendId` param route ----------
+router.get(
+  '/blocks',
+  asyncHandler(async (req, res) => {
+    res.json({ ok: true, data: { blocks: await friendService.listBlocks(req.userId) } });
+  })
+);
+
+router.post(
+  '/blocks',
+  asyncHandler(async (req, res) => {
+    const result = await friendService.addBlock({ userId: req.userId, targetId: req.body && req.body.userId });
+    res.status(201).json({ ok: true, data: result });
+  })
+);
+
+router.delete(
+  '/blocks/:id',
+  asyncHandler(async (req, res) => {
+    const result = await friendService.removeBlock({ userId: req.userId, targetId: req.params.id });
+    res.json({ ok: true, data: result });
+  })
+);
+
+// --- Invite links (邀请链接) -----------------------------------------------
+router.get(
+  '/invite-links',
+  asyncHandler(async (req, res) => {
+    res.json({ ok: true, data: { links: await friendService.listInvites(req.userId) } });
+  })
+);
+
+router.post(
+  '/invite-links',
+  asyncHandler(async (req, res) => {
+    res.status(201).json({ ok: true, data: await friendService.createInvite(req.userId) });
+  })
+);
+
+router.delete(
+  '/invite-links/:token',
+  asyncHandler(async (req, res) => {
+    const result = await friendService.revokeInvite({ userId: req.userId, token: req.params.token });
+    res.json({ ok: true, data: result });
+  })
+);
+
+/** PATCH /api/friends/:friendId { remark } — private per-friend alias. */
+router.patch(
+  '/:friendId',
+  asyncHandler(async (req, res) => {
+    const result = await friendService.setRemark({
+      userId: req.userId,
+      friendId: req.params.friendId,
+      remark: req.body && req.body.remark,
     });
     res.json({ ok: true, data: result });
   })

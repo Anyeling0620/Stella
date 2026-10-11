@@ -19,6 +19,13 @@ const decodeMentions = (value) => {
     .filter((n) => Number.isInteger(n) && n > 0);
 };
 
+const iso = (value) => (value instanceof Date ? value.toISOString() : value);
+
+const QUOTE_COLUMNS = `q.content AS quote_content, q.type AS quote_type,
+                       q.from_user_id AS quote_from_user_id, q.recalled_at AS quote_recalled,
+                       q.attachment_id AS quote_attachment_id`;
+const QUOTE_JOIN = 'LEFT JOIN messages q ON q.id = m.quote_id';
+
 /** Author + attachment columns are only present on queries that join them. */
 const toDTO = (row) => {
   if (!row) return null;
@@ -35,7 +42,10 @@ const toDTO = (row) => {
     attachmentId: row.attachment_id ? Number(row.attachment_id) : null,
     content: row.content,
     status: Number(row.status),
-    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    recalled: Boolean(row.recalled_at),
+    recalledAt: row.recalled_at ? iso(row.recalled_at) : null,
+    quoteId: row.quote_id ? Number(row.quote_id) : null,
+    createdAt: iso(row.created_at),
   };
   if (row.from_nickname !== undefined) {
     dto.fromUser = {
@@ -55,6 +65,17 @@ const toDTO = (row) => {
         }
       : null;
   }
+  if (row.quote_from_user_id !== undefined) {
+    dto.quote = row.quote_id
+      ? {
+          id: Number(row.quote_id),
+          content: row.quote_recalled ? null : row.quote_content,
+          type: row.quote_type || 'text',
+          fromUserId: Number(row.quote_from_user_id),
+          recalled: Boolean(row.quote_recalled),
+        }
+      : null;
+  }
   return dto;
 };
 
@@ -66,13 +87,14 @@ const insert = async ({
   type = 'text',
   mentions = [],
   attachmentId = null,
+  quoteId = null,
   content,
 }) => {
   try {
     const rows = await query(
-      `INSERT INTO messages (client_msg_id, from_user_id, to_user_id, group_id, type, mention_user_ids, attachment_id, content, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-      [clientMsgId || null, fromUserId, toUserId, groupId, type, encodeMentions(mentions), attachmentId, content]
+      `INSERT INTO messages (client_msg_id, from_user_id, to_user_id, group_id, type, mention_user_ids, attachment_id, quote_id, content, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [clientMsgId || null, fromUserId, toUserId, groupId, type, encodeMentions(mentions), attachmentId, quoteId, content]
     );
     return findById(rows.insertId);
   } catch (err) {
@@ -88,37 +110,69 @@ const insert = async ({
 
 const findById = (id) =>
   query(
-    `SELECT m.*, a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime
+    `SELECT m.*, a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime, ${QUOTE_COLUMNS}
        FROM messages m
        LEFT JOIN attachments a ON a.id = m.attachment_id
+       ${QUOTE_JOIN}
       WHERE m.id = ? LIMIT 1`,
     [id]
   ).then((r) => toDTO(r[0]));
 
 const findByClientId = (clientMsgId) =>
   query(
-    `SELECT m.*, a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime
+    `SELECT m.*, a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime, ${QUOTE_COLUMNS}
        FROM messages m
        LEFT JOIN attachments a ON a.id = m.attachment_id
+       ${QUOTE_JOIN}
       WHERE m.client_msg_id = ? LIMIT 1`,
     [clientMsgId]
   ).then((r) => toDTO(r[0]));
 
+/** Marks a message recalled (2-minute window enforced in the service). */
+const recall = async (id, fromUserId) => {
+  const result = await query(
+    'UPDATE messages SET recalled_at = UTC_TIMESTAMP(3), content = ? WHERE id = ? AND from_user_id = ? AND recalled_at IS NULL',
+    ['', id, fromUserId]
+  );
+  return Number(result.affectedRows) > 0;
+};
+
+/** Hides a message for one user only (local delete). */
+const hideForUser = (userId, messageId) =>
+  query('INSERT IGNORE INTO message_hidden (user_id, message_id) VALUES (?, ?)', [userId, messageId]);
+
+const hiddenSet = (userId, ids) => {
+  if (!ids.length) return Promise.resolve(new Set());
+  const placeholders = ids.map(() => '?').join(',');
+  return query(
+    `SELECT message_id FROM message_hidden WHERE user_id = ? AND message_id IN (${placeholders})`,
+    [userId, ...ids]
+  ).then((rows) => new Set(rows.map((r) => Number(r.message_id))));
+};
+
 /**
  * Page of 1:1 history for one conversation, loaded newest-first then re-ordered
- * ascending. `beforeId` enables "load older" pagination.
+ * ascending. `beforeId` enables "load older"; `clearedBefore` (and hidden rows)
+ * let the reader's "清空会话" / "删除" choices take effect.
  */
-const history = async ({ userId, friendId, beforeId = 0, limit = 50 }) => {
+const history = async ({ userId, friendId, beforeId = 0, clearedBefore = 0, limit = 50 }) => {
   const params = [userId, friendId, friendId, userId];
-  let sql = `SELECT m.*, a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime
+  let sql = `SELECT m.*, a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime, ${QUOTE_COLUMNS}
                FROM messages m
                LEFT JOIN attachments a ON a.id = m.attachment_id
+               ${QUOTE_JOIN}
               WHERE ((m.from_user_id = ? AND m.to_user_id = ?) OR (m.from_user_id = ? AND m.to_user_id = ?))
                 AND m.group_id IS NULL`;
   if (beforeId > 0) {
     sql += ' AND m.id < ?';
     params.push(beforeId);
   }
+  if (clearedBefore > 0) {
+    sql += ' AND m.id > ?';
+    params.push(clearedBefore);
+  }
+  sql += ' AND m.id NOT IN (SELECT message_id FROM message_hidden WHERE user_id = ?)';
+  params.push(userId);
   sql += ' ORDER BY m.id DESC LIMIT ?';
   params.push(Math.min(limit, 200));
   const rows = await query(sql, params);
@@ -127,22 +181,81 @@ const history = async ({ userId, friendId, beforeId = 0, limit = 50 }) => {
 };
 
 /** Page of group history, with the author joined in for per-bubble rendering. */
-const groupHistory = async ({ groupId, beforeId = 0, limit = 50 }) => {
+const groupHistory = async ({ groupId, userId = 0, beforeId = 0, clearedBefore = 0, limit = 50 }) => {
   const params = [groupId];
   let sql = `SELECT m.*, u.nickname AS from_nickname, u.avatar AS from_avatar,
-                    a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime
+                    a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime, ${QUOTE_COLUMNS}
                FROM messages m
                LEFT JOIN users u ON u.id = m.from_user_id
                LEFT JOIN attachments a ON a.id = m.attachment_id
+               ${QUOTE_JOIN}
               WHERE m.group_id = ?`;
   if (beforeId > 0) {
     sql += ' AND m.id < ?';
     params.push(beforeId);
   }
+  if (clearedBefore > 0) {
+    sql += ' AND m.id > ?';
+    params.push(clearedBefore);
+  }
+  if (userId) {
+    sql += ' AND m.id NOT IN (SELECT message_id FROM message_hidden WHERE user_id = ?)';
+    params.push(userId);
+  }
   sql += ' ORDER BY m.id DESC LIMIT ?';
   params.push(Math.min(limit, 200));
   const rows = await query(sql, params);
   return rows.reverse().map(toDTO);
+};
+
+/**
+ * In-conversation search (1:1 or group), newest-first, excludes hidden.
+ *
+ * Two modes:
+ * - keyword → text messages whose content matches (the classic 搜索).
+ * - date-only (`from`/`to`) → every jumpable row of that window (any media
+ *   type). `system` notices are excluded because they render without a
+ *   `data-message-id` target, so a result could never be scrolled to.
+ *
+ * `from`/`to` are pre-normalized UTC 'YYYY-MM-DD HH:mm:ss' strings: the pool
+ * pins the session to UTC (see db/pool.js), matching how `created_at` is stored.
+ */
+const search = async ({ userId, friendId = 0, groupId = 0, keyword = '', from = null, to = null, limit = 60 }) => {
+  const kw = (keyword || '').trim();
+  const params = [];
+  let sql = `SELECT m.*, u.nickname AS from_nickname, u.avatar AS from_avatar,
+                    a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime, ${QUOTE_COLUMNS}
+               FROM messages m
+               LEFT JOIN users u ON u.id = m.from_user_id
+               LEFT JOIN attachments a ON a.id = m.attachment_id
+               ${QUOTE_JOIN}
+              WHERE m.recalled_at IS NULL`;
+  if (kw) {
+    sql += " AND m.type = 'text' AND m.content LIKE ?";
+    params.push(`%${kw}%`);
+  } else {
+    sql += " AND m.type <> 'system'";
+  }
+  if (from) {
+    sql += ' AND m.created_at >= ?';
+    params.push(from);
+  }
+  if (to) {
+    sql += ' AND m.created_at < ?';
+    params.push(to);
+  }
+  if (groupId) {
+    sql += ' AND m.group_id = ?';
+    params.push(groupId);
+  } else {
+    sql += ' AND m.group_id IS NULL AND ((m.from_user_id = ? AND m.to_user_id = ?) OR (m.from_user_id = ? AND m.to_user_id = ?))';
+    params.push(userId, friendId, friendId, userId);
+  }
+  sql += ' AND m.id NOT IN (SELECT message_id FROM message_hidden WHERE user_id = ?)';
+  params.push(userId);
+  sql += ' ORDER BY m.id DESC LIMIT ?';
+  params.push(Math.min(limit, 200));
+  return query(sql, params).then((rows) => rows.map(toDTO));
 };
 
 /**
@@ -159,10 +272,11 @@ const incremental = async ({ userId, sinceId = 0, limit = 100 }) => {
   const scope = `(m.to_user_id = ? OR m.from_user_id = ?
                   OR m.group_id IN (SELECT group_id FROM group_members WHERE user_id = ?))`;
   const select = `SELECT m.*, u.nickname AS from_nickname, u.avatar AS from_avatar,
-                         a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime
+                         a.kind AS att_kind, a.original_name AS att_name, a.size AS att_size, a.mime AS att_mime, ${QUOTE_COLUMNS}
                     FROM messages m
                     LEFT JOIN users u ON u.id = m.from_user_id
-                    LEFT JOIN attachments a ON a.id = m.attachment_id`;
+                    LEFT JOIN attachments a ON a.id = m.attachment_id
+                    ${QUOTE_JOIN}`;
   if (sinceId > 0) {
     const rows = await query(
       `${select}
@@ -227,6 +341,20 @@ const authorOf = (userId) =>
     r[0] ? { id: Number(r[0].id), nickname: r[0].nickname, avatar: r[0].avatar || null } : null
   );
 
+/** Newest message id in a conversation (the "clear history" watermark). */
+const maxIdInConversation = ({ peerKind, peerId, userId }) => {
+  if (peerKind === 'group') {
+    return query('SELECT COALESCE(MAX(id), 0) AS m FROM messages WHERE group_id = ?', [peerId]).then((r) =>
+      Number(r[0].m)
+    );
+  }
+  return query(
+    `SELECT COALESCE(MAX(id), 0) AS m FROM messages
+      WHERE group_id IS NULL AND ((from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?))`,
+    [userId, peerId, peerId, userId]
+  ).then((r) => Number(r[0].m));
+};
+
 module.exports = {
   STATUS,
   encodeMentions,
@@ -235,8 +363,13 @@ module.exports = {
   insert,
   findById,
   findByClientId,
+  recall,
+  hideForUser,
+  hiddenSet,
   history,
   groupHistory,
+  search,
+  maxIdInConversation,
   incremental,
   markDelivered,
   receivedUnread,

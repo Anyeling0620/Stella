@@ -20,6 +20,7 @@ const toDTO = (row) => {
     avatar: row.avatar || null,
     ownerId: Number(row.owner_id),
     announcement: row.announcement || null,
+    joinApproval: Boolean(row.join_approval),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -28,7 +29,9 @@ const toDTO = (row) => {
 const memberDTO = (row) => ({
   id: Number(row.id),
   username: row.username,
-  nickname: row.nickname,
+  nickname: row.group_nickname || row.nickname,
+  globalNickname: row.nickname,
+  groupNickname: row.group_nickname || null,
   avatar: row.avatar || null,
   role: row.role,
   joinedAt: row.joined_at,
@@ -100,6 +103,10 @@ const updateGroup = async (id, patch) => {
     assignments.push('announcement = ?');
     params.push(patch.announcement);
   }
+  if (patch.joinApproval !== undefined) {
+    assignments.push('join_approval = ?');
+    params.push(patch.joinApproval ? 1 : 0);
+  }
   if (assignments.length === 0) return findById(id);
   params.push(id);
   await query(`UPDATE \`groups\` SET ${assignments.join(', ')} WHERE id = ?`, params);
@@ -120,11 +127,11 @@ const listMemberIds = (groupId) =>
 
 const listMembers = (groupId) =>
   query(
-    `SELECT u.id, u.username, u.nickname, u.avatar, gm.role, gm.joined_at
+    `SELECT u.id, u.username, u.nickname, u.avatar, gm.role, gm.joined_at, gm.nickname AS group_nickname
        FROM group_members gm
        JOIN users u ON u.id = gm.user_id
       WHERE gm.group_id = ?
-      ORDER BY (gm.role = 'owner') DESC, gm.joined_at ASC`,
+      ORDER BY (gm.role = 'owner') DESC, (gm.role = 'admin') DESC, gm.joined_at ASC`,
     [groupId]
   ).then((rows) => rows.map(memberDTO));
 
@@ -277,6 +284,40 @@ const upsertJoinRequest = async ({ groupId, userId, message }) => {
 const updateJoinRequestStatus = (id, status) =>
   query('UPDATE group_join_requests SET status = ? WHERE id = ?', [status, id]);
 
+/** Owner-appointed administrator ('admin') or demotion back to 'member'. */
+const setRole = (groupId, userId, role) =>
+  query('UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?', [role, groupId, userId]);
+
+/** A member's own in-group alias (群昵称). */
+const setGroupNickname = (groupId, userId, nickname) =>
+  query('UPDATE group_members SET nickname = ? WHERE group_id = ? AND user_id = ?', [nickname, groupId, userId]);
+
+/** Files shared in the group (messages carrying a `file` attachment). */
+const listFiles = (groupId) =>
+  query(
+    `SELECT m.id AS message_id, m.created_at, m.from_user_id,
+            u.nickname AS from_nickname,
+            a.id AS attachment_id, a.original_name, a.size, a.mime
+       FROM messages m
+       JOIN attachments a ON a.id = m.attachment_id
+       LEFT JOIN users u ON u.id = m.from_user_id
+      WHERE m.group_id = ? AND a.kind = 'file'
+      ORDER BY m.id DESC
+      LIMIT 200`,
+    [groupId]
+  ).then((rows) =>
+    rows.map((r) => ({
+      messageId: Number(r.message_id),
+      attachmentId: Number(r.attachment_id),
+      name: r.original_name,
+      size: Number(r.size),
+      mime: r.mime,
+      fromUserId: Number(r.from_user_id),
+      fromNickname: r.from_nickname || null,
+      createdAt: r.created_at,
+    }))
+  );
+
 const listJoinRequests = (groupId, status = 'pending') =>
   query(
     `SELECT r.*, u.username, u.nickname, u.avatar
@@ -309,5 +350,8 @@ module.exports = {
   upsertJoinRequest,
   updateJoinRequestStatus,
   listJoinRequests,
+  setRole,
+  setGroupNickname,
+  listFiles,
   toPublicProfile: toPublic,
 };

@@ -34,6 +34,22 @@ const listFriendIds = (userId) =>
     rows.map((row) => Number(row.friend_id))
   );
 
+/** How many friends the user has (for the 2000-friend cap). */
+const countFriends = (userId) =>
+  query('SELECT COUNT(*) AS n FROM friendships WHERE user_id = ?', [userId]).then((r) =>
+    Number(r[0] ? r[0].n : 0)
+  );
+
+/** Sets/clears a private per-friend remark (备注). Returns whether a row existed. */
+const setRemark = async (userId, friendId, remark) => {
+  const result = await query('UPDATE friendships SET remark = ? WHERE user_id = ? AND friend_id = ?', [
+    remark,
+    userId,
+    friendId,
+  ]);
+  return Number(result.affectedRows) > 0;
+};
+
 /** One-way removal: deletes ONLY the caller's own row. Returns whether it existed. */
 const removeFriendship = async (userId, friendId) => {
   const result = await query('DELETE FROM friendships WHERE user_id = ? AND friend_id = ?', [
@@ -50,7 +66,7 @@ const removeFriendship = async (userId, friendId) => {
  */
 const listFriends = (userId) =>
   query(
-    `SELECT u.id, u.username, u.nickname, u.avatar, u.last_seen_at, f.created_at AS friended_at,
+    `SELECT u.id, u.username, u.nickname, u.avatar, u.bio, u.last_seen_at, f.created_at AS friended_at, f.remark,
             (SELECT m.content FROM messages m
               WHERE m.group_id IS NULL
                 AND ((m.from_user_id = f.user_id AND m.to_user_id = f.friend_id)
@@ -85,6 +101,10 @@ const listFriends = (userId) =>
       username: r.username,
       nickname: r.nickname,
       avatar: r.avatar || null,
+      // 个性签名 — the friend profile page shows it, so it rides along on the
+      // list instead of needing a per-friend fetch.
+      bio: r.bio || null,
+      remark: r.remark || null,
       lastSeenAt: r.last_seen_at,
       friendedAt: r.friended_at,
       unread: Number(r.unread) || 0,
@@ -171,9 +191,11 @@ module.exports = {
   areFriends,
   canChat,
   listFriendIds,
+  countFriends,
   listFriends,
   insertPair,
   removeFriendship,
+  setRemark,
   upsertRequest,
   findRequestBetween,
   findRequestById,

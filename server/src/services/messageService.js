@@ -4,11 +4,17 @@ const messageRepo = require('../repositories/messageRepo');
 const noticeRepo = require('../repositories/noticeRepo');
 const groupRepo = require('../repositories/groupRepo');
 const attachmentRepo = require('../repositories/attachmentRepo');
+const conversationRepo = require('../repositories/conversationRepo');
 const friendService = require('./friendService');
 const groupService = require('./groupService');
 const presenceService = require('./presenceService');
+const accountGuard = require('./accountGuard');
+const contentFilter = require('./contentFilter');
+const pushService = require('./pushService');
 const userRepo = require('../repositories/userRepo');
 const hub = require('../ws/hub');
+const config = require('../config');
+const { createLimiter } = require('../middleware/rateLimit');
 const { SERVER } = require('../ws/protocol');
 const { AppError } = require('../utils/errors');
 const { createLogger } = require('../utils/logger');
@@ -17,6 +23,12 @@ const log = createLogger('message');
 
 const MAX_CONTENT = 2000;
 
+/** 撤回 window (chapter 7): 2 minutes. */
+const RECALL_WINDOW_MS = config.security.messageRecallMs;
+
+/** Per-user send throttle shared by the HTTP and WebSocket paths (60/min). */
+const sendLimiter = createLimiter({ name: 'message', windowMs: 60 * 1000, max: 60 });
+
 function assertContent(content) {
   if (typeof content !== 'string') throw AppError.badRequest('EMPTY_CONTENT', '消息内容不能为空');
   const trimmed = content.replace(/\u0000/g, '').trim();
@@ -24,7 +36,7 @@ function assertContent(content) {
   if (trimmed.length > MAX_CONTENT) {
     throw AppError.badRequest('CONTENT_TOO_LONG', `消息内容不能超过 ${MAX_CONTENT} 个字符`);
   }
-  return trimmed;
+  return contentFilter.assertClean(trimmed, '消息');
 }
 
 /**
@@ -33,11 +45,18 @@ function assertContent(content) {
  * `groupId` present -> group path (routed by membership); otherwise the 1:1
  * path is byte-for-byte the previous behaviour (routed by from/to).
  */
-async function send({ fromUserId, toUserId, groupId, content, clientMsgId, mentions, type, attachmentId }) {
-  if (groupId !== undefined && groupId !== null && groupId !== '') {
-    return sendToGroup({ fromUserId, groupId, content, clientMsgId, mentions, type, attachmentId });
+async function send({ fromUserId, toUserId, groupId, content, clientMsgId, mentions, type, attachmentId, quoteId }) {
+  // Moderation + anti-flood gate, applied to both the HTTP and WS send paths.
+  await accountGuard.assertNotRestricted(fromUserId, '发送消息');
+  const verdict = sendLimiter.check(fromUserId);
+  if (!verdict.allowed) {
+    throw new AppError(429, 'RATE_LIMITED', '发送过于频繁，请稍后再试', { retryAfterSec: verdict.retryAfterSec });
   }
-  return sendDirect({ fromUserId, toUserId, content, clientMsgId, type, attachmentId });
+  const quote = Number(quoteId) || null;
+  if (groupId !== undefined && groupId !== null && groupId !== '') {
+    return sendToGroup({ fromUserId, groupId, content, clientMsgId, mentions, type, attachmentId, quoteId: quote });
+  }
+  return sendDirect({ fromUserId, toUserId, content, clientMsgId, type, attachmentId, quoteId: quote });
 }
 
 /**
@@ -45,17 +64,19 @@ async function send({ fromUserId, toUserId, groupId, content, clientMsgId, menti
  * fallback are derived from the stored attachment (and the sender is checked to
  * own it); otherwise the content is a plain text body.
  */
-async function resolveMedia({ fromUserId, attachmentId, content }) {
+async function resolveMedia({ fromUserId, attachmentId, content, allowForeignAttachment = false }) {
   const attId = Number(attachmentId) || 0;
   if (!attId) return { type: 'text', content: assertContent(content), attachmentId: null };
 
   const attachment = await attachmentRepo.findById(attId);
   if (!attachment) throw AppError.badRequest('ATTACHMENT_NOT_FOUND', '附件不存在');
-  if (Number(attachment.uploader_id) !== Number(fromUserId)) {
+  // Forwarding re-sends an attachment the original recipient legitimately had
+  // access to, so ownership is not re-checked in that path.
+  if (!allowForeignAttachment && Number(attachment.uploader_id) !== Number(fromUserId)) {
     throw AppError.forbidden('ATTACHMENT_FORBIDDEN', '无权发送该附件');
   }
-  const kind = attachment.kind === 'image' ? 'image' : 'file';
-  const fallback = kind === 'image' ? '[图片]' : `[文件] ${attachment.original_name}`;
+  const kind = attachment.kind === 'image' ? 'image' : attachment.kind === 'voice' ? 'voice' : 'file';
+  const fallback = kind === 'image' ? '[图片]' : kind === 'voice' ? '[语音]' : `[文件] ${attachment.original_name}`;
   return { type: kind, content: fallback.slice(0, MAX_CONTENT), attachmentId: Number(attachment.id) };
 }
 
@@ -63,7 +84,7 @@ async function resolveMedia({ fromUserId, attachmentId, content }) {
  * 1:1 send: persisted then fanned out to every tab of both participants.
  * Delivery status is decided at write time based on recipient presence.
  */
-async function sendDirect({ fromUserId, toUserId, content, clientMsgId, type, attachmentId }) {
+async function sendDirect({ fromUserId, toUserId, content, clientMsgId, type, attachmentId, quoteId = null, allowForeignAttachment = false }) {
   const targetId = Number(toUserId);
   if (!Number.isInteger(targetId) || targetId <= 0) {
     throw AppError.badRequest('INVALID_TARGET', '接收人不存在');
@@ -73,7 +94,7 @@ async function sendDirect({ fromUserId, toUserId, content, clientMsgId, type, at
   }
   await friendService.assertCanChat(fromUserId, targetId);
 
-  const payload = await resolveMedia({ fromUserId, attachmentId, content });
+  const payload = await resolveMedia({ fromUserId, attachmentId, content, allowForeignAttachment });
   const recipientOnline = hub.isOnline(targetId);
   const message = await messageRepo.insert({
     clientMsgId: clientMsgId || null,
@@ -81,6 +102,7 @@ async function sendDirect({ fromUserId, toUserId, content, clientMsgId, type, at
     toUserId: targetId,
     type: payload.type,
     attachmentId: payload.attachmentId,
+    quoteId,
     content: payload.content,
   });
 
@@ -93,6 +115,18 @@ async function sendDirect({ fromUserId, toUserId, content, clientMsgId, type, at
   hub.sendToUser(fromUserId, frame);
   if (targetId !== Number(fromUserId)) hub.sendToUser(targetId, frame);
 
+  // Offline recipient -> Web Push (only when no live socket, to avoid duplicates).
+  if (!hub.isOnline(targetId) && pushService.isEnabled()) {
+    void messageRepo.authorOf(fromUserId).then((author) => {
+      pushService.notifyUser(targetId, {
+        title: author ? author.nickname : '新消息',
+        body: message.content,
+        tag: `d:${fromUserId}`,
+        conversationId: `d:${fromUserId}`,
+      });
+    });
+  }
+
   log.debug(`msg ${message.id} ${fromUserId}->${targetId}`);
   return message;
 }
@@ -101,7 +135,7 @@ async function sendDirect({ fromUserId, toUserId, content, clientMsgId, type, at
  * Group send: any member may post. Mentions are validated against the roster so
  * a client cannot "mention" a non-member (or inject arbitrary ids).
  */
-async function sendToGroup({ fromUserId, groupId, content, clientMsgId, mentions, type, attachmentId }) {
+async function sendToGroup({ fromUserId, groupId, content, clientMsgId, mentions, type, attachmentId, quoteId = null, allowForeignAttachment = false }) {
   const gid = Number(groupId);
   const { group } = await groupService.assertMember(gid, fromUserId);
 
@@ -111,7 +145,7 @@ async function sendToGroup({ fromUserId, groupId, content, clientMsgId, mentions
     .map(Number)
     .filter((n) => Number.isInteger(n) && n > 0 && memberSet.has(n) && n !== Number(fromUserId));
 
-  const payload = await resolveMedia({ fromUserId, attachmentId, content });
+  const payload = await resolveMedia({ fromUserId, attachmentId, content, allowForeignAttachment });
   const message = await messageRepo.insert({
     clientMsgId: clientMsgId || null,
     fromUserId,
@@ -120,6 +154,7 @@ async function sendToGroup({ fromUserId, groupId, content, clientMsgId, mentions
     type: payload.type,
     mentions: mentionIds,
     attachmentId: payload.attachmentId,
+    quoteId,
     content: payload.content,
   });
 
@@ -135,6 +170,20 @@ async function sendToGroup({ fromUserId, groupId, content, clientMsgId, mentions
   const frame = { type: SERVER.CHAT_MESSAGE, message: { ...message, fromUser } };
   for (const id of memberIds) hub.sendToUser(id, frame);
 
+  // Push offline members (chapter 10): wechat-style "群名: 发送者: 内容".
+  if (pushService.isEnabled()) {
+    for (const id of memberIds) {
+      const mid = Number(id);
+      if (mid === Number(fromUserId) || hub.isOnline(mid)) continue;
+      void pushService.notifyUser(mid, {
+        title: group.name,
+        body: `${fromUser ? fromUser.nickname : '成员'}：${message.content}`,
+        tag: `g:${gid}`,
+        conversationId: `g:${gid}`,
+      });
+    }
+  }
+
   log.debug(`group msg ${message.id} ${fromUserId}=>${group.id} (${memberIds.length})`);
   return message;
 }
@@ -144,21 +193,35 @@ async function history({ userId, friendId, beforeId = 0, limit = 50 }) {
   if (!Number.isInteger(targetId) || targetId <= 0) {
     throw AppError.badRequest('INVALID_FRIEND', '会话对象不存在');
   }
-  const [peer, messages] = await Promise.all([
+  const [peer, settings] = await Promise.all([
     userRepo.findPublicById(targetId),
-    messageRepo.history({ userId, friendId: targetId, beforeId: Number(beforeId) || 0, limit: Number(limit) || 50 }),
+    conversationRepo.get({ userId, peerKind: 'direct', peerId: targetId }),
   ]);
   if (!peer) throw AppError.notFound('USER_NOT_FOUND', '对方用户不存在');
-  return { peer: userRepo.toPublic(peer), messages };
+  const messages = await messageRepo.history({
+    userId,
+    friendId: targetId,
+    beforeId: Number(beforeId) || 0,
+    clearedBefore: settings.clearedBeforeId,
+    limit: Number(limit) || 50,
+  });
+  return { peer: userRepo.toPublic(peer), messages, settings };
 }
 
 /** Group history mirrors the 1:1 shape: header data + a page of messages. */
 async function groupHistory({ userId, groupId, beforeId = 0, limit = 50 }) {
   const gid = Number(groupId);
   const { group } = await groupService.assertMember(gid, userId);
+  const settings = await conversationRepo.get({ userId, peerKind: 'group', peerId: gid });
   const [roster, messages] = await Promise.all([
     groupRepo.listMembers(gid),
-    messageRepo.groupHistory({ groupId: gid, beforeId: Number(beforeId) || 0, limit: Number(limit) || 50 }),
+    messageRepo.groupHistory({
+      groupId: gid,
+      userId,
+      beforeId: Number(beforeId) || 0,
+      clearedBefore: settings.clearedBeforeId,
+      limit: Number(limit) || 50,
+    }),
   ]);
   // Annotate presence so the thread header can show "N 人在线" from first paint.
   const members = presenceService.annotate(roster);
@@ -170,6 +233,7 @@ async function groupHistory({ userId, groupId, beforeId = 0, limit = 50 }) {
     },
     members,
     messages,
+    settings,
   };
 }
 
@@ -236,4 +300,171 @@ async function readGroup({ userId, groupId, lastMessageId }) {
   return { ok: true, lastMessageId: last };
 }
 
-module.exports = { send, sendDirect, sendToGroup, history, groupHistory, poll, markRead, readGroup, MAX_CONTENT };
+/** True when `userId` may see / act on this message. */
+async function visibleTo(userId, message) {
+  const uid = Number(userId);
+  if (message.groupId) {
+    const ids = await groupRepo.listMemberIds(message.groupId);
+    return ids.map(Number).includes(uid);
+  }
+  return message.fromUserId === uid || message.toUserId === uid;
+}
+
+/** Delivers a conversation-scoped frame to every participant. */
+async function fanOut(message, frame) {
+  if (message.groupId) {
+    const ids = await groupRepo.listMemberIds(message.groupId);
+    for (const id of ids) hub.sendToUser(id, frame);
+    return;
+  }
+  hub.sendToUser(message.fromUserId, frame);
+  hub.sendToUser(message.toUserId, frame);
+}
+
+/** 撤回: sender-only, within the recall window. */
+async function recall({ userId, messageId }) {
+  const id = Number(messageId);
+  if (!Number.isInteger(id) || id <= 0) throw AppError.badRequest('INVALID_MESSAGE', '消息不存在');
+  const message = await messageRepo.findById(id);
+  if (!message) throw AppError.notFound('MESSAGE_NOT_FOUND', '消息不存在');
+  if (message.fromUserId !== Number(userId)) throw AppError.forbidden('NOT_AUTHOR', '只能撤回自己发送的消息');
+  if (message.recalled) return { ok: true, message };
+
+  const age = Date.now() - new Date(message.createdAt).getTime();
+  if (age > RECALL_WINDOW_MS) throw AppError.badRequest('RECALL_EXPIRED', '超过 2 分钟的消息不能撤回');
+
+  await messageRepo.recall(id, userId);
+  const updated = await messageRepo.findById(id);
+  const frame = {
+    type: SERVER.CHAT_RECALLED,
+    messageId: id,
+    groupId: updated.groupId,
+    fromUserId: updated.fromUserId,
+    toUserId: updated.toUserId,
+    message: updated,
+  };
+  await fanOut(updated, frame);
+  log.debug(`recall ${id} by ${userId}`);
+  return { ok: true, message: updated };
+}
+
+/** Local-only delete ("删除"): hides the message for the caller. */
+async function deleteLocal({ userId, messageId }) {
+  const id = Number(messageId);
+  const message = await messageRepo.findById(id);
+  if (!message) throw AppError.notFound('MESSAGE_NOT_FOUND', '消息不存在');
+  if (!(await visibleTo(userId, message))) throw AppError.forbidden('FORBIDDEN', '无权操作该消息');
+  await messageRepo.hideForUser(userId, id);
+  return { ok: true, messageId: id };
+}
+
+/** Clear history: sets a per-user watermark so older rows stop loading. */
+async function clearConversation({ userId, peerKind, peerId }) {
+  const kind = peerKind === 'group' ? 'group' : 'direct';
+  const pid = Number(peerId);
+  if (!Number.isInteger(pid) || pid <= 0) throw AppError.badRequest('INVALID_TARGET', '会话不存在');
+  if (kind === 'group') await groupService.assertMember(pid, userId);
+
+  const beforeId = await messageRepo.maxIdInConversation({ userId, peerKind: kind, peerId: pid });
+  const settings = await conversationRepo.setCleared({ userId, peerKind: kind, peerId: pid, clearedBeforeId: beforeId });
+  return { ok: true, peerKind: kind, peerId: pid, settings };
+}
+
+/** Normalize an ISO date string to a UTC 'YYYY-MM-DD HH:mm:ss' bound (or null). */
+const toUtcBound = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+};
+
+/**
+ * In-conversation search (1:1 or group).
+ *
+ * Either a keyword, a date window, or both. An empty keyword with a date window
+ * browses that window (all jumpable rows) — WeChat's 按日期.
+ */
+async function searchMessages({ userId, friendId, groupId, keyword, from, to }) {
+  const kw = (keyword || '').toString().trim();
+  const fromUtc = toUtcBound(from);
+  const toUtc = toUtcBound(to);
+  if (kw.length === 0 && !fromUtc && !toUtc) return [];
+  if (fromUtc && toUtc && fromUtc >= toUtc) throw AppError.badRequest('INVALID_RANGE', '日期范围不正确');
+  const gid = Number(groupId) || 0;
+  if (gid) {
+    await groupService.assertMember(gid, userId);
+  } else {
+    const fid = Number(friendId);
+    if (!Number.isInteger(fid) || fid <= 0) throw AppError.badRequest('INVALID_FRIEND', '会话对象不存在');
+  }
+  return messageRepo.search({
+    userId,
+    friendId: Number(friendId) || 0,
+    groupId: gid,
+    keyword: kw.slice(0, 64),
+    from: fromUtc,
+    to: toUtc,
+  });
+}
+
+/** 逐条转发 to friends and/or groups, preserving media + text. */
+async function forward({ userId, messageId, targetUserIds = [], targetGroupIds = [] }) {
+  const id = Number(messageId);
+  const original = await messageRepo.findById(id);
+  if (!original) throw AppError.notFound('MESSAGE_NOT_FOUND', '消息不存在');
+  if (!(await visibleTo(userId, original))) throw AppError.forbidden('FORBIDDEN', '无权转发该消息');
+  if (original.recalled) throw AppError.badRequest('RECALLED', '已撤回的消息不能转发');
+
+  const users = (Array.isArray(targetUserIds) ? targetUserIds : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const groups = (Array.isArray(targetGroupIds) ? targetGroupIds : []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  if (users.length === 0 && groups.length === 0) {
+    throw AppError.badRequest('NO_TARGET', '请选择转发对象');
+  }
+
+  const sent = [];
+  for (const tid of users) {
+    sent.push(
+      await sendDirect({
+        fromUserId: userId,
+        toUserId: tid,
+        content: original.content,
+        clientMsgId: `fwd-${id}-u${tid}-${Date.now()}-${sent.length}`,
+        type: original.type,
+        attachmentId: original.attachmentId,
+        allowForeignAttachment: true,
+      })
+    );
+  }
+  for (const gid of groups) {
+    sent.push(
+      await sendToGroup({
+        fromUserId: userId,
+        groupId: gid,
+        content: original.content,
+        clientMsgId: `fwd-${id}-g${gid}-${Date.now()}-${sent.length}`,
+        type: original.type,
+        attachmentId: original.attachmentId,
+        allowForeignAttachment: true,
+      })
+    );
+  }
+  return { forwarded: sent.length, messages: sent };
+}
+
+module.exports = {
+  send,
+  sendDirect,
+  sendToGroup,
+  history,
+  groupHistory,
+  poll,
+  markRead,
+  readGroup,
+  recall,
+  deleteLocal,
+  clearConversation,
+  searchMessages,
+  forward,
+  MAX_CONTENT,
+  RECALL_WINDOW_MS,
+};

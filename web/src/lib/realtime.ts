@@ -162,7 +162,9 @@ export class RealtimeClient {
 
   private startWorker(): void {
     try {
-      this.worker = new SharedWorker('/ws-worker.js');
+      // NB: named `realtime-worker.js`, NOT `ws-worker.js` — a path starting
+      // with `/ws` would be swallowed by the dev/preview `/ws` proxy rule.
+      this.worker = new SharedWorker(`${BASE_URL_FOR_ENGINE}realtime-worker.js`);
       this.port = this.worker.port;
       this.port.onmessage = (event: MessageEvent) => this.handleWorkerMessage(event.data as Record<string, unknown>);
       this.port.start();

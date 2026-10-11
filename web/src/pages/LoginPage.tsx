@@ -16,6 +16,7 @@ export function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [nickname, setNickname] = useState('');
+  const [rememberMe, setRememberMe] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -31,11 +32,12 @@ export function LoginPage() {
     try {
       const payload =
         mode === 'login'
-          ? await authApi.login({ username: username.trim(), password })
+          ? await authApi.login({ username: username.trim(), password, rememberMe })
           : await authApi.register({
               username: username.trim(),
               password,
               nickname: nickname.trim() || undefined,
+              rememberMe,
             });
       signIn(payload);
       navigate('/', { replace: true });
@@ -104,6 +106,16 @@ export function LoginPage() {
             autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
             required
           />
+        </label>
+
+        <label className="login-remember">
+          <input
+            type="checkbox"
+            data-testid="remember-me"
+            checked={rememberMe}
+            onChange={(event) => setRememberMe(event.target.checked)}
+          />
+          <span>记住我（30 天内免登录）</span>
         </label>
 
         {error && <div className="form-error">{error}</div>}

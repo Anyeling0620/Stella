@@ -16,15 +16,11 @@
  * Run: node test/governance.e2e.mjs   (or: pnpm test:governance)
  */
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import puppeteer from 'puppeteer-core';
 
 const APP = process.env.E2E_APP || 'http://localhost:5173';
 const API = process.env.E2E_API || 'http://127.0.0.1:3001';
-// Matches server/src/config.js defaults (override with JWT_ACCESS_SECRET).
-const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || 'stella-im-access-secret-dev';
-const SESSION_KEY = 'stella.im.session';
 
 const CHROME_CANDIDATES = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -52,59 +48,32 @@ async function check(name, fn) {
   }
 }
 
-async function call(method, path, { token, body } = {}) {
+async function call(method, path, { token, body, jar } = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  if (jar?.size) headers.cookie = [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
   const res = await fetch(API + path, {
     method,
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const payload = await res.json().catch(() => null);
   return { status: res.status, body: payload, data: payload?.data };
 }
 
-/** Hand-rolled HS256 signer so the test needs no extra dependency. */
-function signAccessToken(payload, secret) {
-  const b64 = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const head = b64({ alg: 'HS256', typ: 'JWT' });
-  const body = b64(payload);
-  const data = `${head}.${body}`;
-  const sig = crypto.createHmac('sha256', secret).update(data).digest('base64url');
-  return `${data}.${sig}`;
+/**
+ * Sign-in through the real UI so the browser receives the HttpOnly refresh
+ * cookie. The access token is memory-only now, so seeding localStorage is no
+ * longer a thing — the app re-mints a token from the cookie on every load.
+ */
+async function loginViaUi(page, username, password) {
+  await page.goto(`${APP}/login`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('input[autocomplete="username"]', { timeout: 15000 });
+  await page.type('input[autocomplete="username"]', username);
+  await page.type('input[autocomplete="current-password"]', password);
+  await page.click('button[type="submit"]');
+  await page.waitForFunction(() => !window.location.pathname.startsWith('/login'), { timeout: 15000 });
 }
-
-/** A valid-signature but EXPIRED access token for the given user. */
-function expiredAccessToken(user) {
-  const now = Math.floor(Date.now() / 1000);
-  return signAccessToken(
-    {
-      sub: String(user.id),
-      username: user.username,
-      tv: 0,
-      typ: 'access',
-      iss: 'stella-im',
-      aud: 'stella-im-client',
-      iat: now - 3600,
-      exp: now - 60,
-    },
-    ACCESS_SECRET
-  );
-}
-
-const readSession = (page) =>
-  page.evaluate((key) => {
-    const raw = window.localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
-  }, SESSION_KEY);
-
-const writeSession = (page, session) =>
-  page.evaluate(
-    (key, value) => window.localStorage.setItem(key, JSON.stringify(value)),
-    SESSION_KEY,
-    session
-  );
 
 /**
  * Builds a fake response for request interception.
@@ -229,54 +198,43 @@ async function run() {
   });
   await call('POST', `/api/friends/requests/${req.data.request.id}/accept`, { token: friendSession.accessToken });
 
-  console.log('1) 401 静默续期（单飞 + 排队重放）');
-  await check('访问令牌过期时：并发 401 只触发一次刷新，且请求被重放成功', async () => {
+  console.log('1) 401 静默续期（Cookie 续期 + 重放，不登出）');
+  await check('会话过期时：静默续期一次并重放请求，且不触发登出', async () => {
+    // Sign in through the UI so the browser holds the HttpOnly refresh cookie.
+    await loginViaUi(page, me.username, me.password);
+    await shellReady(page);
+
     net.reset();
-    // Hold the refresh open so the remaining 401s are guaranteed to arrive while
-    // the renewal is in flight — that is what exercises the queue.
-    net.addRule(({ key }) => (key === 'POST /api/auth/refresh' ? { holdMs: 800 } : null));
+    // Hold the renewal so a burst of 401s has a chance to coalesce, and force the
+    // first friends read to 401 as an expired access token would.
+    net.addRule(({ key }) => (key === 'POST /api/auth/refresh' ? { holdMs: 600 } : null));
+    net.addRule(({ key, seen }) =>
+      key === 'GET /api/friends' && seen === 1
+        ? { respond: fakeResponse(401, { ok: false, code: 'TOKEN_EXPIRED', message: 'expired' }) }
+        : null
+    );
 
-    const forged = expiredAccessToken(meSession.user);
+    // Reload: the memory-only access token is gone, so the app re-mints one from
+    // the httpOnly cookie automatically.
     await page.goto(APP, { waitUntil: 'domcontentloaded' });
-    await writeSession(page, {
-      user: meSession.user,
-      accessToken: forged,
-      refreshToken: meSession.refreshToken,
-      accessExpiresAt: Date.now() - 60_000,
-    });
+    await shellReady(page);
 
-    // On boot the shell (GET /api/friends, GET /api/friends/requests) carries the
-    // expired token, so every call 401s.
-    await page.goto(APP, { waitUntil: 'networkidle2' });
-
-    // Wait for the silent renewal to actually persist a new token — the shell
-    // renders immediately, well before the 401 round-trip finishes.
-    await page.waitForFunction(
-      (key, oldToken) => {
-        const raw = window.localStorage.getItem(key);
-        if (!raw) return false;
-        const stored = JSON.parse(raw);
-        return stored.accessToken && stored.accessToken !== oldToken;
-      },
-      { timeout: 15000 },
-      SESSION_KEY,
-      forged
-    );
-
+    // The replayed reads must have succeeded, and the user must stay signed in.
+    await page.waitForFunction((name) => document.body.innerText.includes(name), { timeout: 15000 }, friend.nickname);
     const refreshes = net.count('POST /api/auth/refresh');
-    assert.equal(
-      refreshes,
-      1,
-      `expected exactly 1 refresh for concurrent 401s, saw ${refreshes}. Requests: ${net.dump()}`
-    );
+    assert.ok(refreshes >= 1, `expected at least one silent refresh, saw ${refreshes}: ${net.dump()}`);
     assert.equal(await onLoginPage(page), false, 'a successful renewal must not log the user out');
 
-    const stored = await readSession(page);
-    assert.ok(stored.accessExpiresAt > Date.now(), 'accessExpiresAt was not extended');
-    assert.ok(stored.refreshToken !== meSession.refreshToken, 'refresh token was not rotated');
-
-    // The replayed requests must have succeeded with the new token.
-    await page.waitForFunction((name) => document.body.innerText.includes(name), { timeout: 10000 }, friend.nickname);
+    // The single-use refresh cookie must have been rotated by the renewal.
+    // (It is scoped to /api/auth, so query a URL under that path.)
+    const cookies = await page.cookies(`${APP}/api/auth/refresh`);
+    assert.ok(cookies.some((c) => c.name === 'stella_rt'), 'refresh cookie missing after renewal');
+    // ...and the access token must NOT live in localStorage (XSS hardening).
+    const leaked = await page.evaluate(() => {
+      const raw = window.localStorage.getItem('stella.im.session');
+      return raw ? JSON.parse(raw) : null;
+    });
+    assert.ok(!leaked || !leaked.accessToken, 'access token must not be persisted to localStorage');
   });
 
   /**

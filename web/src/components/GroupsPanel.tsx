@@ -5,12 +5,13 @@ import { convKey } from '../lib/conversation';
 import { useAppActions } from '../context/AppContext';
 import { Avatar } from './Avatar';
 import type { Group } from '../types';
+import { Icon } from './Icon';
 
 interface GroupsPanelProps {
   groups: Group[];
   unread: Record<string, number>;
   mentioned: Record<string, boolean>;
-  onOpenConversation: (key: string) => void;
+  onOpenGroup: (groupId: number) => void;
   onCreateGroup: () => void;
   frozen: boolean;
 }
@@ -26,7 +27,7 @@ export const GroupsPanel = memo(function GroupsPanel({
   groups,
   unread,
   mentioned,
-  onOpenConversation,
+  onOpenGroup,
   onCreateGroup,
   frozen,
 }: GroupsPanelProps) {
@@ -107,7 +108,7 @@ export const GroupsPanel = memo(function GroupsPanel({
         disabled={frozen}
         onClick={onCreateGroup}
       >
-        ＋ 发起群聊
+        <Icon name="plus" size={16} /> 发起群聊
       </button>
 
       {keyword.trim().length > 0 && (
@@ -152,7 +153,7 @@ export const GroupsPanel = memo(function GroupsPanel({
               className="conversation-item conversation-group"
               data-testid="group-item"
               data-group-id={group.id}
-              onClick={() => onOpenConversation(key)}
+              onClick={() => onOpenGroup(group.id)}
               disabled={frozen}
             >
               <Avatar name={group.name} avatar={group.avatar} size={40} />

@@ -9,7 +9,23 @@ export function formatClock(iso: string | undefined): string { // 这是一个�
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-export function formatDateTime(iso: string | undefined): string {
+/** "最后活跃 …" shown for an offline peer (shared by the chat header and 好友资料). */
+export function formatLastSeen(iso?: string | null): string {
+  if (!iso) return '离线';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '离线';
+  const minutes = Math.floor((Date.now() - then) / 60000);
+  if (minutes < 1) return '刚刚活跃';
+  if (minutes < 60) return `${minutes} 分钟前活跃`;
+  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)} 小时前活跃`;
+  return '离线';
+}
+
+/** 备注 wins over 昵称 — the WeChat display rule, in one place. */
+export const displayName = (user: { nickname: string; remark?: string | null }): string =>
+  user.remark?.trim() || user.nickname;
+
+export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '';

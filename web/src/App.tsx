@@ -8,7 +8,9 @@ import type { ReactNode } from 'react';
 
 /** Route guard driven purely by the session capability in the context. */
 function RequireAuth({ children }: { children: ReactNode }) {
-  const { isAuthenticated } = useAppSession();
+  const { isAuthenticated, authReady } = useAppSession();
+  // Wait for the boot refresh so a reload does not flash the login page.
+  if (!authReady) return <div className="app-boot" aria-hidden="true" />;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }

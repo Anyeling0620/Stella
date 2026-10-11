@@ -121,12 +121,28 @@ async function registerThroughUi(page, username, nickname) {
 const hasFrozenOverlay = (page) =>
   page.evaluate(() => document.querySelector('[data-testid="frozen-overlay"]') !== null);
 
-/** Reads the session the app persisted (also validates the storage contract). */
+/** Reads the session the app persisted (now a user HINT only — no tokens). */
 const readSession = (page) =>
   page.evaluate(() => {
     const raw = window.localStorage.getItem('stella.im.session');
     return raw ? JSON.parse(raw) : null;
   });
+
+/**
+ * Mints a fresh access token for a user by logging in directly against the API.
+ * The browser only keeps the access token in memory (`readSession().user` is a
+ * non-sensitive hint), so tests that need to call the raw API authenticate here.
+ */
+async function loginToken(username, password = 'passw0rd') {
+  const res = await fetch(`${API}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const payload = await res.json();
+  assert.ok(payload?.data?.accessToken, `login failed for ${username}: ${JSON.stringify(payload)}`);
+  return { accessToken: payload.data.accessToken, user: payload.data.user };
+}
 
 // ---------------------------------------------------------------------------
 async function run() {
@@ -185,10 +201,14 @@ async function run() {
     await waitForConnections(before + 1, 10000, 'after login');
   });
 
-  await check('会话被持久化，且侧边栏显示 SharedWorker 传输信息', async () => {
+  await check('会话仅持久化用户提示，令牌不落 localStorage；侧边栏显示传输信息', async () => {
     const stored = await readSession(page1);
-    assert.ok(stored?.accessToken && stored?.refreshToken, 'session not persisted in localStorage');
-    assert.ok(stored.user.username === userA.username, 'unexpected persisted user');
+    assert.ok(stored?.user, 'user hint not persisted in localStorage');
+    assert.equal(stored.user.username, userA.username, 'unexpected persisted user');
+    // XSS hardening: the access token must be memory-only, the refresh token
+    // must live in an HttpOnly cookie.
+    assert.equal(stored.accessToken, undefined, 'access token must not be persisted');
+    assert.equal(stored.refreshToken, undefined, 'refresh token must not be persisted');
 
     assert.equal(
       await testIdAttr(page1, 'status-pill', 'data-transport'),
@@ -258,9 +278,8 @@ async function run() {
   });
 
   await check('建立双向好友关系（HTTP 请求 + WS 推送同步到双方）', async () => {
-    const sessionA = await readSession(page1);
-    const sessionB = await readSession(pageB);
-    assert.ok(sessionA && sessionB, 'missing sessions');
+    const sessionA = await loginToken(userA.username);
+    const sessionB = await loginToken(userB.username);
 
     const search = await fetch(`${API}/api/friends/search?q=${encodeURIComponent(userB.username)}`, {
       headers: { authorization: `Bearer ${sessionA.accessToken}` },
@@ -322,8 +341,8 @@ async function run() {
     await page1.bringToFront();
     await page1.waitForSelector('[data-testid="composer-input"]', { timeout: 8000 });
 
-    const sessionB = await readSession(pageB);
-    const sessionA = await readSession(page1);
+    const sessionB = await loginToken(userB.username);
+    const sessionA = await loginToken(userA.username);
     const content = `reply-${tag}`;
 
     await fetch(`${API}/api/messages`, {
@@ -475,8 +494,8 @@ async function run() {
     assert.equal(stillListed, false, 'removed friend is still in my conversation list');
 
     // The peer keeps their side (one-way), so they can still reach me.
-    const sessionA = await readSession(page1);
-    const sessionB = await readSession(pageB);
+    const sessionA = await loginToken(userA.username);
+    const sessionB = await loginToken(userB.username);
     const theirs = await fetch(`${API}/api/friends`, {
       headers: { authorization: `Bearer ${sessionB.accessToken}` },
     }).then((r) => r.json());

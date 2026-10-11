@@ -11,6 +11,7 @@ const CLIENT = { // 这是一个定义WebSocket客户端事件类型的对象，
   PING: 'ping',
   AUTH_REFRESH: 'auth:refresh',
   CHAT_SEND: 'chat:send',
+  CHAT_RECALL: 'chat:recall',
   MESSAGE_READ: 'message:read',
 };
 
@@ -21,6 +22,12 @@ const SERVER = {  // 这是一个定义WebSocket服务器端事件类型的对�
   CHAT_MESSAGE: 'chat:message',
   CHAT_ERROR: 'chat:error',
   CHAT_STATUS: 'chat:status',
+  /** A message was recalled. Payload: { messageId, conversationId, message } */
+  CHAT_RECALLED: 'chat:recalled',
+  /** Pin/mute/clear changed. Payload: { peerKind, peerId, settings } */
+  CONVERSATION_UPDATED: 'conversation:updated',
+  /** Favourites changed on another device. Payload: { action, favoriteId } */
+  FAVORITE_UPDATED: 'favorite:updated',
   FRIEND_REQUEST: 'friend:request',
   FRIEND_ACCEPTED: 'friend:accepted',
   /** A one-way removal: only the actor's own tabs receive this. */
@@ -37,6 +44,8 @@ const SERVER = {  // 这是一个定义WebSocket服务器端事件类型的对�
   GROUP_MEMBER_ADDED: 'group:member_added',
   GROUP_MEMBER_REMOVED: 'group:member_removed',
   GROUP_MEMBER_LEFT: 'group:member_left',
+  /** A member's role or group nickname changed: roster refresh. */
+  GROUP_MEMBER_UPDATED: 'group:member_updated',
   GROUP_DISSOLVED: 'group:dissolved',
   /** An applicant asks to join: pushed to the group owner's tabs. */
   GROUP_JOIN_REQUESTED: 'group:join_requested',

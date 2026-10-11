@@ -64,8 +64,75 @@ router.post(
       mentions: body.mentions,
       type: body.type,
       attachmentId: body.attachmentId,
+      quoteId: body.quoteId,
     });
     res.status(201).json({ ok: true, data: { message } });
+  })
+);
+
+/**
+ * GET /api/messages/search?friendId=&groupId=&q=&from=&to=
+ * In-conversation search. `q` matches text; `from`/`to` (ISO) bound a date
+ * window (either alone browses that window, media included).
+ */
+router.get(
+  '/search',
+  asyncHandler(async (req, res) => {
+    const messages = await messageService.searchMessages({
+      userId: req.userId,
+      friendId: req.query.friendId,
+      groupId: req.query.groupId,
+      keyword: req.query.q,
+      from: req.query.from,
+      to: req.query.to,
+    });
+    res.json({ ok: true, data: { messages } });
+  })
+);
+
+/** POST /api/messages/conversation/clear { peerKind, peerId } */
+router.post(
+  '/conversation/clear',
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const result = await messageService.clearConversation({
+      userId: req.userId,
+      peerKind: body.peerKind,
+      peerId: body.peerId,
+    });
+    res.json({ ok: true, data: result });
+  })
+);
+
+/** POST /api/messages/:id/recall — ungated by the 2-minute window in the service. */
+router.post(
+  '/:id/recall',
+  asyncHandler(async (req, res) => {
+    const result = await messageService.recall({ userId: req.userId, messageId: req.params.id });
+    res.json({ ok: true, data: result });
+  })
+);
+
+/** POST /api/messages/:id/forward { targetUserIds, targetGroupIds } */
+router.post(
+  '/:id/forward',
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const result = await messageService.forward({
+      userId: req.userId,
+      messageId: req.params.id,
+      targetUserIds: body.targetUserIds,
+      targetGroupIds: body.targetGroupIds,
+    });
+    res.json({ ok: true, data: result });
+  })
+);
+
+/** DELETE /api/messages/:id — local delete (my view only). */
+router.delete(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    res.json({ ok: true, data: await messageService.deleteLocal({ userId: req.userId, messageId: req.params.id }) });
   })
 );
 

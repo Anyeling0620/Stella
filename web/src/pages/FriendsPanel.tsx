@@ -2,8 +2,10 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { friendApi } from '../lib/api';
 import { ApiError, isCancelError } from '../lib/axiosClient';
 import { convKey } from '../lib/conversation';
+import { displayName } from '../lib/format';
 import { useAppActions } from '../context/AppContext';
 import { Avatar } from '../components/Avatar';
+import { Icon } from '../components/Icon';
 import { PresenceAvatar } from '../components/PresenceAvatar';
 import type { FriendRequest, User } from '../types';
 
@@ -15,7 +17,8 @@ interface FriendsPanelProps {
   /** Live presence, keyed by user id. */
   presence: Record<number, boolean>;
   onRespond: (requestId: number, action: 'accept' | 'reject') => Promise<void>;
-  onOpenConversation: (friendId: number) => void;
+  /** Opens 好友资料 in the main pane (WeChat: the row is the profile, not the chat). */
+  onOpenProfile: (friendId: number) => void;
   /** Jumps to the group list (the 「群聊」 shortcut row). */
   onOpenGroups: () => void;
   /** One-way removal: drops the friend from MY list only. */
@@ -24,7 +27,7 @@ interface FriendsPanelProps {
   frozen: boolean;
 }
 
-const byNickname = (a: User, b: User) => a.nickname.localeCompare(b.nickname, 'zh-CN');
+const byNickname = (a: User, b: User) => displayName(a).localeCompare(displayName(b), 'zh-CN');
 
 /** Section letter for the alphabet index: A–Z, everything else under `#`. */
 const initialOf = (name: string): string => {
@@ -46,7 +49,7 @@ export const FriendsPanel = memo(function FriendsPanel({
   unread,
   presence,
   onRespond,
-  onOpenConversation,
+  onOpenProfile,
   onOpenGroups,
   onRemove,
   frozen,
@@ -154,13 +157,13 @@ export const FriendsPanel = memo(function FriendsPanel({
       return (
         <div key={friend.id} className="list-row row-confirm" data-testid="friend-row" data-friend-id={friend.id}>
           <PresenceAvatar
-            name={friend.nickname}
+            name={displayName(friend)}
             avatar={friend.avatar}
             size={40}
             online={presence[friend.id] ?? Boolean(friend.online)}
           />
           <div className="list-row-text">
-            <div className="list-row-title">{friend.nickname}</div>
+            <div className="list-row-title">{displayName(friend)}</div>
             <div className="list-row-sub">仅从我的列表移除</div>
           </div>
           <div className="list-row-actions">
@@ -193,17 +196,17 @@ export const FriendsPanel = memo(function FriendsPanel({
           type="button"
           className="list-row-main clickable"
           data-testid="friend-open"
-          onClick={() => onOpenConversation(friend.id)}
+          onClick={() => onOpenProfile(friend.id)}
           disabled={frozen}
         >
           <PresenceAvatar
-            name={friend.nickname}
+            name={displayName(friend)}
             avatar={friend.avatar}
             size={40}
             online={presence[friend.id] ?? Boolean(friend.online)}
           />
           <span className="list-row-text">
-            <span className="list-row-title">{friend.nickname}</span>
+            <span className="list-row-title">{displayName(friend)}</span>
           </span>
           {unreadCount > 0 && (
             <span className="badge badge-unread">{unreadCount > 99 ? '99+' : unreadCount}</span>
@@ -236,7 +239,7 @@ export const FriendsPanel = memo(function FriendsPanel({
             aria-label="返回"
             onClick={() => setSub('list')}
           >
-            ‹
+            <Icon name="chevron-left" size={20} />
           </button>
           <span className="contacts-sub-title">新的朋友</span>
         </header>
@@ -335,14 +338,14 @@ export const FriendsPanel = memo(function FriendsPanel({
               onClick={() => setSub('requests')}
             >
               <span className="entry-icon entry-icon-new" aria-hidden="true">
-                +
+                <Icon name="plus" size={20} />
               </span>
               <span className="entry-title">新的朋友</span>
               {incoming.length > 0 && (
                 <span className="badge badge-unread">{incoming.length > 99 ? '99+' : incoming.length}</span>
               )}
               <span className="entry-chevron" aria-hidden="true">
-                ›
+                <Icon name="chevron-right" size={16} />
               </span>
             </button>
 
@@ -354,11 +357,11 @@ export const FriendsPanel = memo(function FriendsPanel({
               onClick={onOpenGroups}
             >
               <span className="entry-icon entry-icon-groups" aria-hidden="true">
-                #
+                <Icon name="group" size={20} />
               </span>
               <span className="entry-title">群聊</span>
               <span className="entry-chevron" aria-hidden="true">
-                ›
+                <Icon name="chevron-right" size={16} />
               </span>
             </button>
 

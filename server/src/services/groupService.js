@@ -6,6 +6,8 @@ const friendRepo = require('../repositories/friendRepo');
 const messageRepo = require('../repositories/messageRepo');
 const hub = require('../ws/hub');
 const presenceService = require('./presenceService');
+const accountGuard = require('./accountGuard');
+const contentFilter = require('./contentFilter');
 const { SERVER } = require('../ws/protocol');
 const { isValidAvatar } = require('../constants/avatars');
 const { AppError } = require('../utils/errors');
@@ -70,6 +72,12 @@ async function assertOwner(group, userId) {
   }
 }
 
+/** Owner or an appointed admin. */
+async function assertOwnerOrAdmin(group, membership) {
+  if (membership && (membership.role === 'owner' || membership.role === 'admin')) return;
+  throw AppError.forbidden('NOT_GROUP_ADMIN', '只有群主或管理员可以执行该操作');
+}
+
 /** Persists and fans out an in-thread system notice. */
 async function postSystemMessage(groupId, content, memberIds) {
   const ids = memberIds || (await groupRepo.listMemberIds(groupId));
@@ -120,6 +128,7 @@ async function groupPayload(groupId) {
 }
 
 async function createGroup({ ownerId, name, memberIds }) {
+  await accountGuard.assertNotRestricted(ownerId, '创建群聊');
   const groupName = normaliseName(name);
   const candidates = normaliseIdList(memberIds).filter((id) => id !== Number(ownerId));
 
@@ -178,6 +187,7 @@ async function update({ userId, groupId, patch = {} }) {
     next.avatar = patch.avatar;
   }
   if (patch.announcement !== undefined) next.announcement = normaliseAnnouncement(patch.announcement);
+  if (patch.joinApproval !== undefined) next.joinApproval = Boolean(patch.joinApproval);
   if (Object.keys(next).length === 0) {
     throw AppError.badRequest('NOTHING_TO_UPDATE', '没有需要更新的字段');
   }
@@ -193,8 +203,8 @@ async function update({ userId, groupId, patch = {} }) {
 
 async function addMembers({ userId, groupId, userIds }) {
   const gid = Number(groupId);
-  const { group } = await assertMember(gid, userId);
-  await assertOwner(group, userId);
+  const { group, membership } = await assertMember(gid, userId);
+  await assertOwnerOrAdmin(group, membership);
 
   const candidates = normaliseIdList(userIds).filter((id) => id !== Number(userId));
   const admitted = [];
@@ -235,6 +245,27 @@ async function requestJoin({ userId, groupId, message }) {
   const request = await groupRepo.upsertJoinRequest({ groupId: gid, userId, message: note });
   const applicant = await userRepo.findPublicById(userId);
 
+  // Open group (入群确认 off): admit immediately, no owner action needed.
+  if (!group.join_approval) {
+    await groupRepo.updateJoinRequestStatus(request.id, 'approved');
+    await admitMembers(gid, [userId], [applicant ? applicant.nickname : '新成员']);
+    hub.sendToUser(userId, {
+      type: SERVER.GROUP_JOIN_RESULT,
+      groupId: gid,
+      groupName: group.name,
+      status: 'approved',
+      group: await groupPayload(gid),
+    });
+    log.info(`join auto-approved (open group) ${userId} -> ${gid}`);
+    return {
+      id: Number(request.id),
+      groupId: gid,
+      status: 'approved',
+      autoApproved: true,
+      createdAt: request.created_at,
+    };
+  }
+
   hub.sendToUser(Number(group.owner_id), {
     type: SERVER.GROUP_JOIN_REQUESTED,
     groupId: gid,
@@ -259,19 +290,19 @@ async function requestJoin({ userId, groupId, message }) {
   };
 }
 
-/** Pending join requests for a group (owner only). */
+/** Pending join requests for a group (owner or admin). */
 async function listJoinRequests({ userId, groupId }) {
   const gid = Number(groupId);
-  const { group } = await assertMember(gid, userId);
-  await assertOwner(group, userId);
+  const { group, membership } = await assertMember(gid, userId);
+  await assertOwnerOrAdmin(group, membership);
   return groupRepo.listJoinRequests(gid, 'pending');
 }
 
-/** Approve / reject a join request (owner only). Approving admits the applicant. */
+/** Approve / reject a join request (owner or admin). Approving admits the applicant. */
 async function respondJoin({ userId, groupId, requestId, action }) {
   const gid = Number(groupId);
-  const { group } = await assertMember(gid, userId);
-  await assertOwner(group, userId);
+  const { group, membership } = await assertMember(gid, userId);
+  await assertOwnerOrAdmin(group, membership);
   if (action !== 'approve' && action !== 'reject') {
     throw AppError.badRequest('INVALID_ACTION', 'action 仅支持 approve / reject');
   }
@@ -312,12 +343,15 @@ async function respondJoin({ userId, groupId, requestId, action }) {
 
 async function removeMember({ userId, groupId, memberId }) {
   const gid = Number(groupId);
-  const { group } = await assertMember(gid, userId);
-  await assertOwner(group, userId);
+  const { group, membership } = await assertMember(gid, userId);
+  await assertOwnerOrAdmin(group, membership);
 
   const targetId = Number(memberId);
   if (targetId === Number(userId)) {
     throw AppError.badRequest('CANNOT_REMOVE_SELF', '群主不能移除自己，请使用解散群聊');
+  }
+  if (Number(group.owner_id) === targetId) {
+    throw AppError.forbidden('CANNOT_REMOVE_OWNER', '不能移除群主');
   }
   if (!(await groupRepo.isMember(gid, targetId))) {
     throw AppError.notFound('NOT_GROUP_MEMBER', '该成员不在群聊中');
@@ -367,6 +401,54 @@ async function leave({ userId, groupId }) {
   return { groupId: gid, left: true };
 }
 
+/** Member sets their own in-group nickname (群昵称). */
+async function setGroupNickname({ userId, groupId, nickname }) {
+  const gid = Number(groupId);
+  const { membership } = await assertMember(gid, userId);
+  if (!membership) throw AppError.forbidden('NOT_GROUP_MEMBER', '你不在该群聊中');
+
+  let cleaned = null;
+  if (nickname !== undefined && nickname !== null && String(nickname).trim() !== '') {
+    cleaned = contentFilter
+      .assertClean(String(nickname).replace(/\u0000/g, '').trim().slice(0, 64), '群昵称')
+      .slice(0, 64);
+  }
+  await groupRepo.setGroupNickname(gid, userId, cleaned);
+  const memberIds = await groupRepo.listMemberIds(gid);
+  const members = withPresence(await groupRepo.listMembers(gid));
+  broadcast(memberIds, { type: SERVER.GROUP_MEMBER_UPDATED, groupId: gid, members });
+  return { groupId: gid, groupNickname: cleaned };
+}
+
+/** Owner appoints/demotes an admin (设置/取消管理员). */
+async function setMemberRole({ userId, groupId, memberId, role }) {
+  const gid = Number(groupId);
+  const { group } = await assertMember(gid, userId);
+  await assertOwner(group, userId);
+  if (role !== 'admin' && role !== 'member') {
+    throw AppError.badRequest('INVALID_ROLE', 'role 仅支持 admin / member');
+  }
+  const targetId = Number(memberId);
+  if (targetId === Number(group.owner_id)) {
+    throw AppError.badRequest('CANNOT_CHANGE_OWNER', '不能修改群主角色');
+  }
+  if (!(await groupRepo.isMember(gid, targetId))) {
+    throw AppError.notFound('NOT_GROUP_MEMBER', '该成员不在群聊中');
+  }
+  await groupRepo.setRole(gid, targetId, role);
+  const memberIds = await groupRepo.listMemberIds(gid);
+  const members = withPresence(await groupRepo.listMembers(gid));
+  broadcast(memberIds, { type: SERVER.GROUP_MEMBER_UPDATED, groupId: gid, members });
+  return { groupId: gid, memberId: targetId, role };
+}
+
+/** Files shared in the group. */
+async function listFiles({ userId, groupId }) {
+  const gid = Number(groupId);
+  await assertMember(gid, userId);
+  return groupRepo.listFiles(gid);
+}
+
 module.exports = {
   MAX_NAME,
   MAX_ANNOUNCEMENT,
@@ -377,6 +459,9 @@ module.exports = {
   update,
   addMembers,
   removeMember,
+  setGroupNickname,
+  setMemberRole,
+  listFiles,
   dissolve,
   leave,
   search,

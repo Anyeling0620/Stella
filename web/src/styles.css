@@ -62,6 +62,9 @@
 
   /* semantic roles — the legacy themes borrow the accent for all of them */
   --danger: var(--accent);
+  /* floating menus (right-click): the legacy themes hover in solid accent */
+  --menu-hover: var(--accent);
+  --menu-hover-ink: var(--on-accent);
   --badge-bg: var(--border);
   --badge-ink: var(--on-accent);
   --chip-bg: transparent;
@@ -556,8 +559,10 @@ textarea {
 }
 
 .placeholder-art {
-  font-size: 60px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 10px;
   color: var(--dim);
   opacity: 0.55;
 }
@@ -871,6 +876,11 @@ textarea {
   display: flex;
   min-width: 0;
   min-height: 0;
+  /* The right-hand pages (聊天信息 / 好友资料 / 收藏详情) are absolutely
+     positioned layers over the conversation, so `main` must establish the
+     containing block and clip them. */
+  position: relative;
+  overflow: hidden;
 }
 
 /* Content minimum width — mirrored by the splitter clamp in ChatShell.tsx so
@@ -903,6 +913,296 @@ textarea {
 /* --------------------------------------------------------------------------
    Chat
    -------------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------
+   Right-hand pages — 聊天信息 / 好友资料 / 收藏详情
+   A full-height layer inside `.main`: the conversation underneath stays
+   mounted, so 返回 never refetches or jumps. Sections are separate cards so
+   unrelated actions can never intermingle.
+   -------------------------------------------------------------------------- */
+.side-page {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface);
+}
+
+.side-page-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 56px;
+  flex: 0 0 auto;
+  padding: 0 16px;
+  border-bottom: var(--border-w) solid var(--border);
+}
+
+.side-page-title {
+  font-size: 17px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* --------------------------------------------------------------------------
+   Cells — the WeChat list idiom used by 设置 and every right-hand page.
+   Cards on a tinted pane, inset hairlines between rows, `label … value ›`,
+   centred red text for destructive actions.
+   -------------------------------------------------------------------------- */
+.cell-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.cell-section + .cell-section {
+  margin-top: 16px;
+}
+
+.cell-title {
+  padding: 2px 16px 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.cell-card {
+  background: var(--surface-2, var(--surface));
+  border-radius: var(--radius-card, 0);
+  overflow: hidden;
+}
+
+.cell-foot {
+  padding: 6px 16px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 16px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cell:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Hairline separator, inset to line up with the label. */
+.cell-card > .cell + .cell::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 16px;
+  right: 0;
+  height: var(--border-w-sm);
+  background: var(--border);
+}
+
+.cell:not(:disabled):hover {
+  background: var(--chip-bg, rgba(127, 127, 127, 0.08));
+}
+
+.cell-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cell-label {
+  font-size: 14px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-hint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.cell-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  color: var(--dim);
+}
+
+.cell-value {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.cell.danger {
+  color: var(--danger);
+}
+
+.cell.danger .cell-label {
+  color: var(--danger);
+}
+
+/* A "primary" full-width row (发消息 / 添加到通讯录 …). */
+.cell-primary {
+  justify-content: center;
+  color: var(--brand, var(--accent));
+  font-size: 15px;
+  font-weight: 500;
+}
+
+/* --- 资料页 hero 头（好友资料 / 聊天信息） -------------------------------- */
+/* Card-less: the person leads, the cards of rows start underneath. */
+.profile-hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 0 6px;
+}
+
+.profile-hero-text {
+  min-width: 0;
+}
+
+.profile-hero-name {
+  font-size: 20px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-hero-sub {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* --- 举报 (shared by 好友资料 / 聊天信息) ---------------------------------- */
+.report-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 2px 12px;
+}
+
+/* Inside a dialog the body already carries the padding. */
+.dialog-body .report-form {
+  padding: 0;
+}
+
+.report-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  padding: 5px 10px;
+  border: var(--border-w-sm) solid var(--border);
+  border-radius: var(--radius-pill, 0);
+  background: none;
+  color: var(--text-2, var(--muted));
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chip:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.chip-on {
+  border-color: var(--brand, var(--accent));
+  background: var(--chip-bg, transparent);
+  color: var(--brand, var(--accent));
+}
+
+/* --- favourite detail ---------------------------------------------------- */
+/* The saved message leads in its own card — text/file gets padding, media
+   is inset slightly so the card's rounded edge reads. */
+.favorite-detail-body {
+  padding: 12px 16px;
+}
+
+.favorite-detail-body.is-media {
+  padding: 8px;
+  text-align: center;
+}
+
+.favorite-detail-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+}
+
+.favorite-detail-image {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  border-radius: var(--radius-card, 0);
+}
+
+.favorite-detail-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.favorite-detail-file-main {
+  min-width: 0;
+}
+
+.favorite-detail-file-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.favorite-detail-file-size {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.favorite-detail-audio {
+  width: 100%;
+}
+
 .chat-window {
   display: flex;
   flex-direction: column;
@@ -1362,11 +1662,13 @@ textarea {
 }
 
 .toast-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0 2px;
   border: 0;
   background: transparent;
   color: var(--dim);
-  font-size: 18px;
   line-height: 1;
   cursor: pointer;
 }
@@ -1566,6 +1868,8 @@ textarea {
   --badge-bg: #fa5151;
   --badge-ink: #ffffff;
   --chip-bg: rgba(0, 0, 0, 0.05);
+  --menu-hover: rgba(0, 0, 0, 0.06);
+  --menu-hover-ink: var(--text-1);
   --rail-ink: rgba(255, 255, 255, 0.62);
   --rail-ink-active: #ffffff;
   --rail-hover: rgba(255, 255, 255, 0.1);
@@ -1627,6 +1931,8 @@ textarea {
   --badge-bg: #fa5151;
   --badge-ink: #ffffff;
   --chip-bg: rgba(255, 255, 255, 0.07);
+  --menu-hover: rgba(255, 255, 255, 0.08);
+  --menu-hover-ink: var(--text-1);
   --rail-ink: rgba(255, 255, 255, 0.62);
   --rail-ink-active: #ffffff;
   --rail-hover: rgba(255, 255, 255, 0.1);
@@ -1690,6 +1996,8 @@ textarea {
   --badge-bg: #ff3b30;
   --badge-ink: #ffffff;
   --chip-bg: rgba(120, 120, 128, 0.12);
+  --menu-hover: var(--chip-bg);
+  --menu-hover-ink: var(--text-1);
   --rail-ink: rgba(60, 60, 67, 0.72);
   --rail-ink-active: #1c1c1e;
   --rail-hover: rgba(0, 0, 0, 0.06);
@@ -1751,6 +2059,8 @@ textarea {
   --badge-bg: #ff453a;
   --badge-ink: #ffffff;
   --chip-bg: rgba(120, 120, 128, 0.24);
+  --menu-hover: var(--chip-bg);
+  --menu-hover-ink: var(--text-1);
   --rail-ink: rgba(255, 255, 255, 0.62);
   --rail-ink-active: #ffffff;
   --rail-hover: rgba(255, 255, 255, 0.16);
@@ -1794,7 +2104,9 @@ textarea {
 [data-theme='apple'] .dialog,
 [data-theme='apple-dark'] .dialog,
 [data-theme='apple'] .toast,
-[data-theme='apple-dark'] .toast {
+[data-theme='apple-dark'] .toast,
+[data-theme='apple'] .msg-menu,
+[data-theme='apple-dark'] .msg-menu {
   background: var(--glass-surface, var(--surface));
   backdrop-filter: blur(24px) saturate(180%);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
@@ -2176,6 +2488,11 @@ textarea {
 }
 
 .member-option-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Reserved so a row does not shift when the tick appears. */
+  min-width: 18px;
   color: var(--accent);
 }
 
@@ -2193,46 +2510,6 @@ textarea {
   display: flex;
   gap: 8px;
   padding-top: 6px;
-}
-
-.group-info-avatar {
-  display: flex;
-  justify-content: center;
-}
-
-.group-info-name {
-  font-size: 16px;
-  font-weight: 600;
-  text-align: center;
-}
-
-.group-info-no {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border: var(--border-w-sm) solid var(--dim);
-  border-radius: var(--radius-card, 0);
-  padding: 8px 12px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.group-info-no code {
-  font-family: var(--font-mono);
-  font-size: 14px;
-  color: var(--accent-ink);
-}
-
-.group-info-no button {
-  margin-left: auto;
-}
-
-.group-info-announcement-text {
-  border: var(--border-w-sm) solid var(--dim);
-  border-radius: var(--radius-card, 0);
-  padding: 10px 12px;
-  color: var(--muted);
-  white-space: pre-wrap;
 }
 
 .field textarea {
@@ -2893,9 +3170,10 @@ textarea {
 }
 
 .entry-chevron {
+  display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   color: var(--dim);
-  font-size: 18px;
 }
 
 .contacts-group-title {
@@ -2975,6 +3253,14 @@ textarea {
   width: min(680px, 100%);
 }
 
+/* Fixed height for the settings dialog: switching 分类 must not resize it.
+   `.dialog-split` is `flex:1; min-height:0` and `.dialog-pane` already scrolls,
+   so a definite height is the only missing piece — and `min()` still falls back
+   to the viewport on short screens. */
+.dialog-fixed {
+  height: min(620px, 90dvh);
+}
+
 .dialog-split {
   display: grid;
   grid-template-columns: 168px minmax(0, 1fr);
@@ -3037,11 +3323,6 @@ textarea {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-}
-
-.row-stack {
-  display: grid;
-  gap: 2px;
 }
 
 /* The `hidden` attribute must beat the flex display above. */
@@ -3147,10 +3428,377 @@ textarea {
   color: var(--brand, var(--accent));
 }
 
-.member-online-count {
-  margin-left: 6px;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--brand, var(--accent));
+
+
+/* --------------------------------------------------------------------------
+   P1: account / privacy / security UI
+   -------------------------------------------------------------------------- */
+.app-boot {
+  min-height: 100vh;
+  background: var(--bg);
 }
 
+.login-remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2, var(--muted));
+  cursor: pointer;
+  user-select: none;
+}
+.login-remember input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand, var(--accent));
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-faint, var(--border));
+}
+.settings-row:last-child {
+  border-bottom: none;
+}
+.settings-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.settings-row-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-switch {
+  position: relative;
+  flex: none;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  border: none;
+  background: var(--border);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.settings-switch.on {
+  background: var(--brand, var(--accent));
+}
+.settings-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s ease;
+}
+.settings-switch.on .settings-switch-knob {
+  transform: translateX(18px);
+}
+
+.settings-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-list > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--surface-2, var(--surface));
+  border-radius: 8px;
+}
+.settings-session {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------------------
+   P2: message actions (recall, quote, forward, menu)
+   -------------------------------------------------------------------------- */
+.chat-recalled {
+  color: var(--muted);
+  font-size: 12px;
+}
+.bubble-quote {
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-left: 3px solid var(--brand, var(--accent));
+  background: rgba(127, 127, 127, 0.12);
+  border-radius: 4px;
+  font-size: 12px;
+  opacity: 0.85;
+  max-width: 100%;
+}
+.bubble-quote-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-link {
+  color: var(--brand, var(--accent));
+  text-decoration: underline;
+  word-break: break-all;
+}
+.composer-quote {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  margin: 0 0 6px;
+  border-left: 3px solid var(--brand, var(--accent));
+  background: var(--surface-2, var(--surface));
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-2, var(--muted));
+}
+.composer-quote-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 148px;
+  /* Never taller than the viewport — otherwise the clamp in ContextMenu.tsx
+     (which only moves the box, it cannot shrink it) would still overflow. */
+  max-height: calc(100dvh - 16px);
+  padding: 4px;
+  background: var(--surface-2);
+  border: var(--border-w-sm) solid var(--border);
+  border-radius: var(--radius-card, 0);
+  box-shadow: var(--pop-shadow, var(--hard-shadow));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* `overflow-y: auto` computes the x-axis to `auto` too — force it off so a
+     long label ellipsizes instead of growing a horizontal bar. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  color: var(--text);
+}
+.msg-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 12px;
+  border: none;
+  border-radius: var(--radius-input, 0);
+  background: none;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.msg-menu-item:hover,
+.msg-menu-item:focus-visible {
+  background: var(--menu-hover, var(--surface));
+  color: var(--menu-hover-ink, inherit);
+}
+.msg-menu-item.danger {
+  color: var(--danger);
+}
+/* A destructive row keeps its emphasis while hovered: it fills with the danger
+   colour and flips to the ink that contrasts with it. */
+.msg-menu-item.danger:hover,
+.msg-menu-item.danger:focus-visible {
+  background: var(--danger);
+  color: var(--on-accent);
+}
+.forward-section-title {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.forward-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+  cursor: pointer;
+}
+.forward-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand, var(--accent));
+}
+
+/* --------------------------------------------------------------------------
+   P2: conversation list flags, row menu, favourites panel
+   -------------------------------------------------------------------------- */
+.conv-flag {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 4px;
+  /* Nudge the mark onto the text baseline — an inline SVG sits higher than a
+     glyph of the same size. */
+  vertical-align: -2px;
+  color: var(--muted);
+}
+.favorites-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.favorite-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2, var(--surface));
+}
+
+/* The entry whose detail is open in the main pane. */
+.favorite-item.selected {
+  outline: var(--border-w-sm) solid var(--brand, var(--accent));
+}
+.favorite-main {
+  flex: 1;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  min-width: 0;
+}
+.favorite-content {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   P2: in-conversation search
+   -------------------------------------------------------------------------- */
+.chat-search {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.chat-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+.chat-search-bar input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2, var(--surface));
+  color: var(--text);
+}
+.chat-search-results {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.chat-search-results li button {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  background: none;
+  color: var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.chat-search-results li button:hover {
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+}
+.chat-search-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.chat-search-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- 查找聊天记录 page (ChatSearchPage) ----------------------------------- */
+.chat-search-date-label {
+  flex: none;
+  font-size: 13px;
+  color: var(--muted);
+}
+.chat-search-bar input.chat-search-date {
+  flex: 0 0 auto;
+}
+.chat-search-who {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+/* On the page the result lists grow with the pane instead of scrolling in place. */
+.side-page-body .chat-search-results {
+  max-height: none;
+  padding: 0;
+}
+.side-page-body .chat-search-results li button {
+  padding: 10px 0;
+}
+.side-page-body .chat-search-results .chat-search-text {
+  flex: 1;
+}
+
+/* A 查找聊天记录 jump briefly highlights its target message. */
+.msg-focus {
+  background: rgba(7, 193, 96, 0.14);
+  border-radius: 8px;
+  transition: background 0.4s ease;
+}
+
+/* --------------------------------------------------------------------------
+   P4: voice messages
+   -------------------------------------------------------------------------- */
+.bubble-voice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 160px;
+}
+.voice-audio {
+  height: 34px;
+  max-width: 240px;
+}
+.composer-tool.recording {
+  color: var(--danger, #fa5151);
+}
+
+/* --------------------------------------------------------------------------
+   P3: group enhancements (nickname, admin, files)
+   -------------------------------------------------------------------------- */
+.member-tile-admin {
+  font-size: 11px;
+  margin-top: 2px;
+}

@@ -12,6 +12,14 @@ if (!container) throw new Error('#root 容器不存在');
 // here normalises a stale/invalid stored value.
 applyTheme(readStoredTheme());
 
+// Register the service worker (offline shell + Web Push). Best-effort: a failure
+// (e.g. insecure context) must not block the app.
+if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 ReactDOM.createRoot(container).render(
   <React.StrictMode>
     <BrowserRouter>

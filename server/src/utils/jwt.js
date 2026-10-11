@@ -4,29 +4,33 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const config = require('../config');
 
-const basePayload = (user) => ({
+const basePayload = (user, sid) => ({
   sub: String(user.id),
   username: user.username,
   // token version lets the server invalidate *every* token of a user at once
   // (used by cross-tab global logout) without keeping a blacklist.
   tv: user.token_version ?? 0,
+  // `sid` ties the token to one login lineage so a single device can be revoked
+  // (active-session management) without touching the user's other sessions.
+  ...(sid ? { sid } : {}),
 });
 
-const signAccessToken = (user) =>
-  jwt.sign({ ...basePayload(user), typ: 'access' }, config.jwt.accessSecret, {
+const signAccessToken = (user, { sid } = {}) =>
+  jwt.sign({ ...basePayload(user, sid), typ: 'access' }, config.jwt.accessSecret, {
     expiresIn: config.jwt.accessTtlSec,
     issuer: config.jwt.issuer,
     audience: config.jwt.audience,
   });
 
-const signRefreshToken = (user) => {
+const signRefreshToken = (user, { sid, ttlSec } = {}) => {
+  const ttl = Number.isFinite(ttlSec) && ttlSec > 0 ? ttlSec : config.jwt.refreshTtlSec;
   const jti = crypto.randomUUID();
-  const token = jwt.sign({ ...basePayload(user), typ: 'refresh', jti }, config.jwt.refreshSecret, {
-    expiresIn: config.jwt.refreshTtlSec,
+  const token = jwt.sign({ ...basePayload(user, sid), typ: 'refresh', jti }, config.jwt.refreshSecret, {
+    expiresIn: ttl,
     issuer: config.jwt.issuer,
     audience: config.jwt.audience,
   });
-  return { token, jti, expiresAt: new Date(Date.now() + config.jwt.refreshTtlSec * 1000) };
+  return { token, jti, expiresAt: new Date(Date.now() + ttl * 1000) };
 };
 
 const verifyAccessToken = (token) =>

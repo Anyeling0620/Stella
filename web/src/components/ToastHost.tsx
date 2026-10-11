@@ -1,12 +1,13 @@
 import type { CSSProperties } from 'react';
 import { useAppActions, useToasts } from '../context/AppContext';
+import { Icon, type IconName } from './Icon';
 
-const ICONS: Record<string, string> = {
-  info: '💬',
-  success: '✅',
-  warning: '⚠️',
-  error: '⛔',
-  notice: '📢',
+const ICONS: Record<string, IconName> = {
+  info: 'chat',
+  success: 'check-circle',
+  warning: 'warning',
+  error: 'close-circle',
+  notice: 'megaphone',
 };
 
 /**
@@ -33,7 +34,7 @@ export function ToastHost() {
           style={{ '--depth': String(toasts.length - 1 - index) } as CSSProperties}
         >
           <span className="toast-icon" aria-hidden="true">
-            {ICONS[toast.kind] ?? '💬'}
+            <Icon name={ICONS[toast.kind] ?? 'chat'} size={18} />
           </span>
           <div className="toast-body">
             <div className="toast-title">{toast.title}</div>
@@ -53,7 +54,7 @@ export function ToastHost() {
               </button>
             )}
             <button type="button" className="toast-close" onClick={() => dismissToast(toast.id)} aria-label="关闭">
-              ×
+              <Icon name="close" size={16} />
             </button>
           </div>
         </div>

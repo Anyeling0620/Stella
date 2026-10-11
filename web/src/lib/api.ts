@@ -1,6 +1,6 @@
 import { api, refreshAccessToken, uploadFile } from './axiosClient';
 import { API } from '../config';
-import type { Attachment, ChatMessage, FriendRequest, Group, GroupJoinRequest, GroupMember, SessionPayload, User } from '../types';
+import type { Attachment, AuthSessionInfo, ChatMessage, ConversationSettings, Favorite, FriendRequest, Group, GroupJoinRequest, GroupMember, SessionPayload, User, UserSettings } from '../types';
 
 /**
  * Typed API surface. Every call is a *thin* declaration — all resilience
@@ -8,16 +8,33 @@ import type { Attachment, ChatMessage, FriendRequest, Group, GroupJoinRequest, G
  */
 
 export const authApi = {
-  register: (body: { username: string; password: string; nickname?: string }) =>
+  /** `rememberMe` extends the (cookie-held) refresh lifetime to 30 days. */
+  register: (body: { username: string; password: string; nickname?: string; rememberMe?: boolean }) =>
     api.post<SessionPayload>('/api/auth/register', body),
 
-  login: (body: { username: string; password: string }) => api.post<SessionPayload>('/api/auth/login', body),
+  login: (body: { username: string; password: string; rememberMe?: boolean }) =>
+    api.post<SessionPayload>('/api/auth/login', body),
 
   logout: () => api.post<{ ok: boolean }>('/api/auth/logout'),
 
+  /** Restores a soft-deleted account within the cooling window. */
+  restore: (body: { username: string; password: string }) => api.post<SessionPayload>('/api/auth/restore', body),
+
   /** Both fields optional; `avatar: null` clears it back to the initials mark. */
-  updateProfile: (body: { nickname?: string; avatar?: string | null }) =>
+  updateProfile: (body: { nickname?: string; avatar?: string | null; bio?: string | null }) =>
     api.patch<{ user: User; peersNotified: number }>('/api/auth/me', body),
+
+  changePassword: (body: { oldPassword: string; newPassword: string }) =>
+    api.post<{ ok: boolean }>('/api/auth/password', body),
+
+  /** Soft-delete (注销) the account; requires the password to confirm. */
+  deleteAccount: (password: string) => api.del<{ ok: boolean; coolingDays: number }>('/api/auth/me', { data: { password } }),
+
+  sessions: () => api.get<{ sessions: AuthSessionInfo[] }>('/api/auth/sessions'),
+
+  revokeSession: (sessionId: string) => api.del<{ sessionId: string; revoked: boolean }>(`/api/auth/sessions/${sessionId}`),
+
+  revokeOtherSessions: () => api.post<{ ok: boolean }>('/api/auth/sessions/revoke-others'),
 };
 
 /**
@@ -50,24 +67,58 @@ export const friendApi = {
    * they were not in my list).
    */
   remove: (friendId: number) => api.del<{ friendId: number; removed: boolean }>(`/api/friends/${friendId}`),
+
+  /** Private per-friend alias (备注). Empty/null clears it. */
+  setRemark: (friendId: number, remark: string | null) =>
+    api.patch<{ friendId: number; remark: string | null }>(`/api/friends/${friendId}`, { remark }),
+
+  blocks: () => api.get<{ blocks: Array<User & { blockedAt: string }> }>('/api/friends/blocks'),
+
+  block: (userId: number) => api.post<{ userId: number; blocked: boolean }>('/api/friends/blocks', { userId }),
+
+  unblock: (userId: number) => api.del<{ userId: number; removed: boolean }>(`/api/friends/blocks/${userId}`),
+
+  inviteLinks: () =>
+    api.get<{ links: Array<{ token: string; expiresAt: string; revoked: boolean }> }>('/api/friends/invite-links'),
+
+  createInviteLink: () => api.post<{ token: string; expiresAt: string }>('/api/friends/invite-links'),
+
+  revokeInviteLink: (token: string) => api.del<{ token: string; revoked: boolean }>(`/api/friends/invite-links/${token}`),
 };
 
-/** Media descriptor attached to an outgoing image/file message. */
+export const settingsApi = {
+  get: () => api.get<{ settings: UserSettings }>('/api/settings'),
+  update: (patch: Partial<UserSettings>) => api.patch<{ settings: UserSettings }>('/api/settings', patch),
+};
+
+export const reportApi = {
+  create: (body: { targetType: 'user' | 'group' | 'message'; targetId: number; reason: string; detail?: string }) =>
+    api.post<{ id: number; status: string }>('/api/reports', body),
+  mine: () => api.get<{ reports: Array<Record<string, unknown>> }>('/api/reports/mine'),
+};
+
+/** Media descriptor attached to an outgoing image/file/voice message. */
 export interface OutgoingMedia {
-  type: 'image' | 'file';
+  type: 'image' | 'file' | 'voice';
   attachmentId: number;
 }
 
 export const messageApi = {
   /** "Source A" of the dual-source strategy: stored history over HTTP. */
   history: (friendId: number, beforeId = 0, limit = 50) =>
-    api.get<{ peer: User; messages: ChatMessage[] }>('/api/messages/history', {
+    api.get<{ peer: User; messages: ChatMessage[]; settings?: ConversationSettings }>('/api/messages/history', {
       params: { friendId, beforeId, limit },
     }),
 
   /** HTTP send path (1:1), used when the socket is unavailable. */
-  send: (toUserId: number, content: string, clientMsgId: string, media?: OutgoingMedia) =>
-    api.post<{ message: ChatMessage }>('/api/messages', { toUserId, content, clientMsgId, ...(media ?? {}) }),
+  send: (toUserId: number, content: string, clientMsgId: string, media?: OutgoingMedia, quoteId?: number) =>
+    api.post<{ message: ChatMessage }>('/api/messages', {
+      toUserId,
+      content,
+      clientMsgId,
+      ...(quoteId ? { quoteId } : {}),
+      ...(media ?? {}),
+    }),
 
   /** HTTP send path (group). Mirrors the WS `chat:send` payload. */
   sendToGroup: (
@@ -75,10 +126,40 @@ export const messageApi = {
     content: string,
     clientMsgId: string,
     mentions: number[] = [],
-    media?: OutgoingMedia
-  ) => api.post<{ message: ChatMessage }>('/api/messages', { groupId, content, clientMsgId, mentions, ...(media ?? {}) }),
+    media?: OutgoingMedia,
+    quoteId?: number
+  ) =>
+    api.post<{ message: ChatMessage }>('/api/messages', {
+      groupId,
+      content,
+      clientMsgId,
+      mentions,
+      ...(quoteId ? { quoteId } : {}),
+      ...(media ?? {}),
+    }),
 
   read: (ids: number[]) => api.post<{ ok: boolean; updated: number }>('/api/messages/read', { ids }),
+
+  /** 撤回 (2-minute window enforced server-side). */
+  recall: (messageId: number) => api.post<{ ok: boolean; message: ChatMessage }>(`/api/messages/${messageId}/recall`),
+
+  /** 逐条转发 to friends and/or groups. */
+  forward: (messageId: number, targetUserIds: number[], targetGroupIds: number[] = []) =>
+    api.post<{ forwarded: number; messages: ChatMessage[] }>(`/api/messages/${messageId}/forward`, {
+      targetUserIds,
+      targetGroupIds,
+    }),
+
+  /** Local delete (my view only). */
+  remove: (messageId: number) => api.del<{ ok: boolean; messageId: number }>(`/api/messages/${messageId}`),
+
+  /** Clear my history for one conversation. */
+  clearConversation: (peerKind: 'direct' | 'group', peerId: number) =>
+    api.post<{ ok: boolean }>(`/api/messages/conversation/clear`, { peerKind, peerId }),
+
+  /** In-conversation search. `from`/`to` (ISO) bound a date window. */
+  search: (params: { friendId?: number; groupId?: number; q?: string; from?: string; to?: string }) =>
+    api.get<{ messages: ChatMessage[] }>('/api/messages/search', { params }),
 
   // NB: incremental polling (`GET /api/messages/poll`) is deliberately NOT
   // wrapped here. It is owned by the realtime engine, which runs inside a
@@ -86,10 +167,32 @@ export const messageApi = {
   // The engine performs that call with `fetch` + a bearer token directly.
 };
 
-/** Uploads an image/file and returns its metadata (referenced when sending). */
+/** Pin / mute / clear per conversation. */
+export const conversationApi = {
+  list: () => api.get<{ conversations: ConversationSettings[] }>('/api/conversations'),
+  update: (peerKind: 'direct' | 'group', peerId: number, patch: { pinned?: boolean; muted?: boolean }) =>
+    api.patch<{ settings: ConversationSettings }>(`/api/conversations/${peerKind}/${peerId}`, patch),
+};
+
+/** 收藏 (saved messages). */
+export const favoriteApi = {
+  list: () => api.get<{ favorites: Favorite[] }>('/api/favorites'),
+  add: (messageId: number, srcConversation?: string) =>
+    api.post<{ favorite: Favorite }>('/api/favorites', { messageId, srcConversation }),
+  remove: (id: number) => api.del<{ id: number; removed: boolean }>(`/api/favorites/${id}`),
+};
+
+/** Web Push subscriptions. */
+export const pushApi = {
+  publicKey: () => api.get<{ enabled: boolean; publicKey: string }>('/api/push/public-key'),
+  subscribe: (subscription: PushSubscriptionJSON) => api.post<{ ok: boolean }>('/api/push/subscribe', { subscription }),
+  unsubscribe: (endpoint: string) => api.post<{ ok: boolean }>('/api/push/unsubscribe', { endpoint }),
+};
+
+/** Uploads an image/file/voice and returns its metadata (referenced when sending). */
 export const attachmentApi = {
-  upload: (file: File, onProgress?: (percent: number) => void) =>
-    uploadFile<{ attachment: Attachment }>('/api/attachments', file, onProgress),
+  upload: (file: File, onProgress?: (percent: number) => void, kind?: 'voice') =>
+    uploadFile<{ attachment: Attachment }>('/api/attachments', file, onProgress, kind ? { kind } : undefined),
 };
 
 /**
@@ -123,8 +226,22 @@ export const groupApi = {
 
   detail: (groupId: number) => api.get<{ group: Group; members: GroupMember[] }>(`/api/groups/${groupId}`),
 
-  update: (groupId: number, patch: { name?: string; avatar?: string | null; announcement?: string | null }) =>
+  update: (groupId: number, patch: { name?: string; avatar?: string | null; announcement?: string | null; joinApproval?: boolean }) =>
     api.patch<{ group: Group }>(`/api/groups/${groupId}`, patch),
+
+  /** Set my in-group nickname (null clears it). */
+  setGroupNickname: (groupId: number, nickname: string | null) =>
+    api.patch<{ groupId: number; groupNickname: string | null }>(`/api/groups/${groupId}/members/me`, { nickname }),
+
+  /** Owner appoints/demotes an admin. */
+  setMemberRole: (groupId: number, userId: number, role: 'admin' | 'member') =>
+    api.patch<{ groupId: number; memberId: number; role: string }>(`/api/groups/${groupId}/members/${userId}/role`, { role }),
+
+  /** Files shared in the group. */
+  files: (groupId: number) =>
+    api.get<{ files: Array<{ messageId: number; attachmentId: number; name: string; size: number; mime: string; fromUserId: number; fromNickname: string | null; createdAt: string }> }>(
+      `/api/groups/${groupId}/files`
+    ),
 
   addMembers: (groupId: number, userIds: number[]) =>
     api.post<{ groupId: number; added: number[] }>(`/api/groups/${groupId}/members`, { userIds }),
@@ -140,9 +257,10 @@ export const groupApi = {
   dissolve: (groupId: number) => api.del<{ groupId: number; dissolved: boolean }>(`/api/groups/${groupId}`),
 
   history: (groupId: number, beforeId = 0, limit = 50) =>
-    api.get<{ group: Group; members: GroupMember[]; messages: ChatMessage[] }>(`/api/groups/${groupId}/messages`, {
-      params: { beforeId, limit },
-    }),
+    api.get<{ group: Group; members: GroupMember[]; messages: ChatMessage[]; settings?: ConversationSettings }>(
+      `/api/groups/${groupId}/messages`,
+      { params: { beforeId, limit } }
+    ),
 };
 
 export { refreshAccessToken };

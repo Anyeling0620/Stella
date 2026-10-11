@@ -53,8 +53,48 @@ const config = {
     refreshSecret: process.env.JWT_REFRESH_SECRET || 'stella-im-refresh-secret-dev',
     accessTtlSec: toInt(process.env.ACCESS_TTL_SEC, 15 * 60),
     refreshTtlSec: toInt(process.env.REFRESH_TTL_SEC, 7 * 24 * 3600),
+    // "记住我" extends the refresh lifetime from 1 day to 30 days.
+    rememberMeTtlSec: toInt(process.env.REMEMBER_ME_TTL_SEC, 30 * 24 * 3600),
     issuer: 'stella-im',
     audience: 'stella-im-client',
+  },
+
+  // Account / security-hardening knobs (chapter 15 of the product checklist).
+  security: {
+    // httpOnly refresh cookie. `secure` is forced on in production; in dev the
+    // cookie must stay on http, so it defaults off.
+    cookieName: process.env.REFRESH_COOKIE_NAME || 'stella_rt',
+    cookieSecure: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
+    csrfCookieName: process.env.CSRF_COOKIE_NAME || 'stella_csrf',
+    // A rotated refresh token re-presented within this window is treated as a
+    // benign concurrent refresh (two tabs share one cookie), not token theft.
+    refreshGraceMs: toInt(process.env.REFRESH_GRACE_MS, 30 * 1000),
+    // Login lockout: N failures within the window locks the (account+ip) pair.
+    loginMaxFailures: toInt(process.env.LOGIN_MAX_FAILURES, 5),
+    loginLockMs: toInt(process.env.LOGIN_LOCK_MS, 15 * 60 * 1000),
+    // 注销 cooling period, during which the account can be restored.
+    accountCoolingMs: toInt(process.env.ACCOUNT_COOLING_MS, 7 * 24 * 3600 * 1000),
+    // Rate limits (chapter 14). Disabled wholesale in tests via RATE_LIMIT_DISABLED=1.
+    rateLimitEnabled: process.env.RATE_LIMIT_DISABLED !== '1',
+    maxFriends: toInt(process.env.MAX_FRIENDS, 2000),
+    maxPinnedConversations: toInt(process.env.MAX_PINNED, 10),
+    // 撤回 window (2 minutes).
+    messageRecallMs: toInt(process.env.MESSAGE_RECALL_MS, 2 * 60 * 1000),
+  },
+
+  // Keyword list for the basic 违规内容拦截. Empty by default (opt-in via env).
+  contentFilter: {
+    keywords: toList(process.env.CONTENT_FILTER_WORDS, ''),
+  },
+
+  // Web Push (chapter 10). VAPID keys may be provided via env; when absent and
+  // `enabled`, the server generates an ephemeral pair at boot (dev only — set
+  // real keys for production so subscriptions stay valid across restarts).
+  push: {
+    enabled: process.env.PUSH_ENABLED !== 'false',
+    publicKey: process.env.VAPID_PUBLIC_KEY || '',
+    privateKey: process.env.VAPID_PRIVATE_KEY || '',
+    subject: process.env.VAPID_SUBJECT || 'mailto:admin@stella.im',
   },
 
   ws: {

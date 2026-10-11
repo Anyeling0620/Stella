@@ -1,13 +1,15 @@
 import { ChangeEvent, FormEvent, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { attachmentApi, attachmentRawUrl, groupApi, messageApi, type OutgoingMedia } from '../lib/api';
+import { attachmentApi, attachmentRawUrl, favoriteApi, friendApi, groupApi, messageApi, type OutgoingMedia } from '../lib/api';
 import { ApiError, isCancelError } from '../lib/axiosClient';
 import { STORAGE_KEYS } from '../config';
+import { idbGet, idbPut } from '../lib/idb';
 import { session } from '../lib/session';
 import { uid } from '../lib/storage';
-import { formatBytes, formatClock, formatDayLabel } from '../lib/format';
+import { displayName, formatBytes, formatClock, formatDayLabel, formatLastSeen } from '../lib/format';
 import { useAppActions } from '../context/AppContext';
 import { Avatar } from '../components/Avatar';
-import { GroupInfoDialog } from '../components/GroupInfoDialog';
+import { ContextMenu } from '../components/ContextMenu';
+import { Icon } from '../components/Icon';
 import type { Attachment, ChatMessage, Group, GroupMember, User } from '../types';
 
 /**
@@ -31,7 +33,7 @@ interface LocalMessage {
   fromUserId: number;
   toUserId: number;
   groupId?: number | null;
-  type?: 'text' | 'system' | 'image' | 'file';
+  type?: 'text' | 'system' | 'image' | 'file' | 'voice';
   mentions?: number[];
   fromUser?: { id: number; nickname: string; avatar: string | null };
   attachment?: Attachment | null;
@@ -44,6 +46,18 @@ interface LocalMessage {
   createdAt: string;
   pending?: boolean;
   failed?: boolean;
+  /** Recalled by its author (content cleared; shows a system hint). */
+  recalled?: boolean;
+  recalledAt?: string | null;
+  quoteId?: number | null;
+  quote?: { id: number; content: string | null; type: string; fromUserId: number; recalled: boolean } | null;
+}
+
+/** Context-menu anchor for a message (screen coordinates). */
+interface MessageMenuState {
+  message: LocalMessage;
+  x: number;
+  y: number;
 }
 
 const PAGE_SIZE = 50;
@@ -93,6 +107,12 @@ interface ChatWindowProps {
   presence: Record<number, boolean>;
   /** Mobile-only back affordance; the pane is chosen by ChatShell. */
   onBack?: () => void;
+  /** Set by the shell when a 查找聊天记录 result is picked — scroll to it. */
+  focusMessageId?: number;
+  /** Called once the focus request has been resolved (found or given up). */
+  onFocusConsumed?: () => void;
+  /** Opens 聊天信息 — the single ⋯ destination. */
+  onManage: () => void;
 }
 
 interface MessageRowProps {
@@ -111,6 +131,8 @@ interface MessageRowProps {
   mediaSrc?: string | null;
   onOpenImage: (src: string) => void;
   onRetry: (message: LocalMessage) => void;
+  /** Opens the per-message action menu at the pointer. */
+  onContextMenu: (message: LocalMessage, x: number, y: number) => void;
 }
 
 const renderContent = (content: string, names: string[]) => {
@@ -137,17 +159,33 @@ const renderContent = (content: string, names: string[]) => {
   return nodes;
 };
 
-/** "最后活跃 …" shown for an offline 1:1 peer. */
-function formatLastSeen(iso?: string | null): string {
-  if (!iso) return '离线';
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return '离线';
-  const minutes = Math.floor((Date.now() - then) / 60000);
-  if (minutes < 1) return '刚刚活跃';
-  if (minutes < 60) return `${minutes} 分钟前活跃`;
-  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)} 小时前活跃`;
-  return '离线';
-}
+/**
+ * Linkifies http(s) URLs. External links open in a new tab with
+ * `rel="noopener noreferrer"` (reverse-tabnabbing defence) and are visually
+ * marked so the user can see where a message points before clicking.
+ */
+const renderText = (content: string, names: string[]): ReactNode => {
+  if (names.length > 0) return renderContent(content, names);
+  const parts = content.split(/(https?:\/\/[^\s]+)/g);
+  if (parts.length === 1) return content;
+  return parts.map((part, index) =>
+    /^https?:\/\//.test(part) ? (
+      <a
+        key={`u${index}`}
+        className="msg-link"
+        href={part}
+        target="_blank"
+        rel="noopener noreferrer"
+        title="外部链接，将在新标签页打开"
+        onClick={(event) => event.stopPropagation()}
+      >
+        {part}
+      </a>
+    ) : (
+      part
+    )
+  );
+};
 
 /** Single tick — the message reached the server (已送达). */
 const SentIcon = () => (
@@ -185,57 +223,8 @@ const ReadIcon = () => (
   </svg>
 );
 
-/**
- * Composer glyphs — drawn as line art on the same grid as the rail icons, so
- * they read as one icon language instead of stray emoji/text characters.
- */
-const glyphProps = {
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.7,
-  strokeLinecap: 'round' as const,
-  strokeLinejoin: 'round' as const,
-  'aria-hidden': true,
-};
-
-const EmojiIcon = () => (
-  <svg className="composer-icon" width="22" height="22" {...glyphProps}>
-    <circle cx="12" cy="12" r="9" />
-    <path d="M8.4 14.4a4.6 4.6 0 0 0 7.2 0" />
-    <circle cx="9.2" cy="9.6" r="0.7" fill="currentColor" stroke="none" />
-    <circle cx="14.8" cy="9.6" r="0.7" fill="currentColor" stroke="none" />
-  </svg>
-);
-
-const PlusCircleIcon = () => (
-  <svg className="composer-icon" width="22" height="22" {...glyphProps}>
-    <circle cx="12" cy="12" r="9" />
-    <path d="M12 8.4v7.2M8.4 12h7.2" />
-  </svg>
-);
-
-const MentionIcon = () => (
-  <svg className="composer-icon" width="22" height="22" {...glyphProps}>
-    <circle cx="12" cy="12" r="3.6" />
-    <path d="M15.6 8.4v5.1a2.55 2.55 0 0 0 5.1 0V12a8.7 8.7 0 1 0-3.4 6.9" />
-  </svg>
-);
-
-const PhotoIcon = () => (
-  <svg className="attach-icon" width="18" height="18" {...glyphProps}>
-    <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
-    <circle cx="9" cy="10" r="1.5" />
-    <path d="M4.5 17.2l4.3-4.3 3.7 3.7 2.6-2.6 4.4 4.4" />
-  </svg>
-);
-
-const DocumentIcon = () => (
-  <svg className="file-icon-svg" width="26" height="26" {...glyphProps}>
-    <path d="M6.5 4.3c0-1 .8-1.8 1.8-1.8h5.2l5 5v12.2c0 1-.8 1.8-1.8 1.8H8.3c-1 0-1.8-.8-1.8-1.8z" />
-    <path d="M13.5 2.5v4.9h4.9" />
-  </svg>
-);
+// Composer / attachment glyphs live in `components/Icon` with the rest of the
+// set — same 24px grid, same 1.7 stroke, `currentColor`.
 
 /**
  * A single bubble. Memoized: message objects keep their identity between
@@ -253,6 +242,7 @@ const MessageRow = memo(function MessageRow({
   mediaSrc,
   onOpenImage,
   onRetry,
+  onContextMenu,
 }: MessageRowProps) {
   const day = showDay ? <div className="day-separator">{formatDayLabel(message.createdAt)}</div> : null;
 
@@ -265,10 +255,37 @@ const MessageRow = memo(function MessageRow({
     );
   }
 
+  // A recalled message collapses to a centred hint (no bubble).
+  if (message.recalled) {
+    return (
+      <div>
+        {day}
+        <div className="chat-system chat-recalled">
+          {mine ? '你撤回了一条消息' : `${otherName} 撤回了一条消息`}
+        </div>
+      </div>
+    );
+  }
+
+  const quoteBlock = message.quote ? (
+    <div className="bubble-quote">
+      <span className="bubble-quote-text">
+        {message.quote.recalled ? '消息已撤回' : message.quote.content || '[消息]'}
+      </span>
+    </div>
+  ) : null;
+
   return (
-    <div>
+    <div data-message-id={message.id > 0 ? message.id : undefined}>
       {day}
-      <div className={`bubble-row ${mine ? 'mine' : 'theirs'}`}>
+      <div
+        className={`bubble-row ${mine ? 'mine' : 'theirs'}`}
+        onContextMenu={(event) => {
+          if (message.pending || message.failed) return;
+          event.preventDefault();
+          onContextMenu(message, event.clientX, event.clientY);
+        }}
+      >
         {!mine && <Avatar name={otherName} avatar={otherAvatar} size={32} tone="muted" />}
         <div className="bubble-column">
           {!mine && showSenderName && <div className="bubble-sender">{otherName}</div>}
@@ -285,7 +302,17 @@ const MessageRow = memo(function MessageRow({
               message.type === 'image' || message.type === 'file' ? 'bubble-media' : ''
             }`}
           >
-            {message.type === 'image' ? (
+            {quoteBlock}
+            {message.type === 'voice' ? (
+              <div className="bubble-voice">
+                {mediaSrc ? (
+                  <audio controls preload="metadata" src={mediaSrc} className="voice-audio" />
+                ) : (
+                  <span className="media-placeholder">语音</span>
+                )}
+                {message.uploading != null && <span className="media-progress">{message.uploading}%</span>}
+              </div>
+            ) : message.type === 'image' ? (
               <button
                 type="button"
                 className="bubble-image-btn"
@@ -303,7 +330,7 @@ const MessageRow = memo(function MessageRow({
             ) : message.type === 'file' ? (
               <div className="bubble-file">
                 <span className="file-icon" aria-hidden="true">
-                  <DocumentIcon />
+                  <Icon name="file" size={26} className="file-icon-svg" />
                 </span>
                 <span className="file-main">
                   <span className="file-name">{message.attachment?.name ?? '文件'}</span>
@@ -323,7 +350,7 @@ const MessageRow = memo(function MessageRow({
                 ) : null}
               </div>
             ) : (
-              renderContent(message.content, mentionNames)
+              renderText(message.content, mentionNames)
             )}
             </div>
           </div>
@@ -363,6 +390,9 @@ export const ChatWindow = memo(function ChatWindow({
   groupHint,
   presence,
   onBack,
+  focusMessageId,
+  onFocusConsumed,
+  onManage,
 }: ChatWindowProps) {
   const { subscribeFrames, publishCursor, sendFrame, pushToast } = useAppActions();
   const isGroup = kind === 'group';
@@ -376,16 +406,31 @@ export const ChatWindow = memo(function ChatWindow({
   const [hasMore, setHasMore] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [groupInfoOpen, setGroupInfoOpen] = useState(false);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentioned, setMentioned] = useState<number[]>([]);
   const [attachOpen, setAttachOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
   /** Full-screen image preview src (null when closed). */
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  /** Right-click action menu anchored at a message. */
+  const [menu, setMenu] = useState<MessageMenuState | null>(null);
+  /** Message being quoted (引用回复). */
+  const [quote, setQuote] = useState<LocalMessage | null>(null);
+  /** Message being forwarded (opens the target picker). */
+  const [forwardOf, setForwardOf] = useState<LocalMessage | null>(null);
+  /** Forward picker source lists (loaded when the picker opens). */
+  const [forwardFriends, setForwardFriends] = useState<User[]>([]);
+  const [forwardGroups, setForwardGroups] = useState<Group[]>([]);
+  const [forwardPicked, setForwardPicked] = useState<Set<string>>(new Set());
+  /** Voice recording state. */
+  const [recording, setRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
 
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunksRef = useRef<Blob[]>([]);
+  const recordTimerRef = useRef<number | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   // Composer height: dragged via its top edge; written to `--composer-h` on the
   // window element (no state). Once dragged, the textarea stops auto-growing and
@@ -399,6 +444,8 @@ export const ChatWindow = memo(function ChatWindow({
   /** Older pages count *down* so they sort before the live thread. */
   const olderSeqRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  /** Bounded retries for scrolling to a 查找聊天记录 result (loads older pages). */
+  const focusTriesRef = useRef(0);
   /**
    * Scroll anchoring. The thread must follow new messages but must NOT yank the
    * view while the user reads history:
@@ -409,6 +456,8 @@ export const ChatWindow = memo(function ChatWindow({
   const atBottomRef = useRef(true);
   /** Mirrors `conversationId` so deferred callbacks can bail if it changed. */
   const conversationRef = useRef(conversationId);
+  /** Conversation whose baseline history has loaded (gates 查找聊天记录 focus). */
+  const loadedConvRef = useRef<number | null>(null);
   const pendingPrependRef = useRef<{ height: number; top: number } | null>(null);
   const pendingTimers = useRef(new Map<string, number>());
   /** When each optimistic bubble first showed "sending" (for MIN_PENDING_MS). */
@@ -569,6 +618,7 @@ export const ChatWindow = memo(function ChatWindow({
   useEffect(() => {
     let cancelled = false;
     conversationRef.current = conversationId;
+    loadedConvRef.current = null;
     seqRef.current = 0;
     olderSeqRef.current = 0;
     pendingTimers.current.forEach((timer) => window.clearTimeout(timer));
@@ -584,10 +634,27 @@ export const ChatWindow = memo(function ChatWindow({
     setMembers([]);
     setMentioned([]);
     setMentionOpen(false);
-    setGroupInfoOpen(false);
     setAttachOpen(false);
     setEmojiOpen(false);
     setPreviewSrc(null);
+    setMenu(null);
+    setQuote(null);
+    setForwardOf(null);
+    // Stop any in-progress voice recording when leaving the thread.
+    if (recorderRef.current) {
+      try {
+        recorderRef.current.onstop = null;
+        recorderRef.current.stop();
+      } catch {
+        /* ignore */
+      }
+      recorderRef.current = null;
+    }
+    if (recordTimerRef.current !== null) {
+      window.clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    setRecording(false);
     setHasMore(false);
     setDraft('');
     // A freshly opened thread always starts parked at the newest message.
@@ -595,6 +662,14 @@ export const ChatWindow = memo(function ChatWindow({
     pendingPrependRef.current = null;
 
     if (!conversationId) return undefined;
+
+    // Instant first paint from the local cache (best-effort; server is truth).
+    const cacheKey = `${isGroup ? 'g' : 'd'}:${conversationId}:messages`;
+    void idbGet<ChatMessage[]>(cacheKey).then((cached) => {
+      if (cached && !cancelled && conversationRef.current === conversationId && cached.length > 0) {
+        setMessages(cached.map((message) => ({ ...message, seq: nextSeq() })));
+      }
+    });
 
     setLoading(true);
     const request = isGroup
@@ -619,6 +694,9 @@ export const ChatWindow = memo(function ChatWindow({
         setMembers(data.members);
         setMessages(data.messages.map((message) => ({ ...message, seq: nextSeq() })));
         setHasMore(data.messages.length >= PAGE_SIZE);
+        loadedConvRef.current = conversationId;
+        // Cache the newest page for an offline / fast first paint next time.
+        void idbPut(cacheKey, data.messages.slice(-100));
         const maxId = data.messages.reduce((acc, m) => (m.id > acc ? m.id : acc), 0);
         if (maxId > 0) publishCursor({ messageId: maxId });
         if (isGroup) {
@@ -692,6 +770,19 @@ export const ChatWindow = memo(function ChatWindow({
         return;
       }
 
+      // 撤回: collapse the bubble to a system hint.
+      if (frame.type === 'chat:recalled') {
+        const messageId = Number(frame.messageId);
+        const involves = isGroup
+          ? Number(frame.groupId) === conversationId
+          : Number(frame.fromUserId) === conversationId || Number(frame.toUserId) === conversationId;
+        if (!messageId || !involves) return;
+        setMessages((previous) =>
+          previous.map((m) => (m.id === messageId ? { ...m, recalled: true, content: '' } : m))
+        );
+        return;
+      }
+
       // Group roster / profile changes for the open group.
       if (isGroup) {
         if (frame.type === 'group:updated') {
@@ -702,7 +793,8 @@ export const ChatWindow = memo(function ChatWindow({
         if (
           frame.type === 'group:member_added' ||
           frame.type === 'group:member_removed' ||
-          frame.type === 'group:member_left'
+          frame.type === 'group:member_left' ||
+          frame.type === 'group:member_updated'
         ) {
           if (Number(frame.groupId) === conversationId && Array.isArray(frame.members)) {
             setMembers(frame.members as GroupMember[]);
@@ -897,11 +989,11 @@ export const ChatWindow = memo(function ChatWindow({
   );
 
   const deliver = useCallback(
-    async (clientMsgId: string, content: string, mentions: number[]) => {
+    async (clientMsgId: string, content: string, mentions: number[], quoteId?: number | null) => {
       const viaSocket = sendFrame(
         isGroup
-          ? { type: 'chat:send', clientMsgId, groupId: conversationId, content, mentions }
-          : { type: 'chat:send', clientMsgId, toUserId: conversationId, content }
+          ? { type: 'chat:send', clientMsgId, groupId: conversationId, content, mentions, ...(quoteId ? { quoteId } : {}) }
+          : { type: 'chat:send', clientMsgId, toUserId: conversationId, content, ...(quoteId ? { quoteId } : {}) }
       );
       if (viaSocket) return; // the server echo reconciles the optimistic entry
 
@@ -909,8 +1001,8 @@ export const ChatWindow = memo(function ChatWindow({
       setSending(true);
       try {
         const { message } = isGroup
-          ? await messageApi.sendToGroup(conversationId, content, clientMsgId, mentions)
-          : await messageApi.send(conversationId, content, clientMsgId);
+          ? await messageApi.sendToGroup(conversationId, content, clientMsgId, mentions, undefined, quoteId ?? undefined)
+          : await messageApi.send(conversationId, content, clientMsgId, undefined, quoteId ?? undefined);
         upsert(message);
       } catch (error) {
         setMessages((previous) =>
@@ -1015,12 +1107,111 @@ export const ChatWindow = memo(function ChatWindow({
     [conversationId, isGroup, myId, nextSeq, beginPending, armPendingTimeout, deliverMedia, pushToast, trackObjectUrl]
   );
 
+  /** Uploads a recorded voice clip and sends it (语音消息). */
+  const sendVoice = useCallback(
+    async (blob: Blob) => {
+      if (!conversationId || blob.size === 0) return;
+      const clientMsgId = uid();
+      const mime = blob.type || 'audio/webm';
+      const file = new File([blob], `voice-${Date.now()}.webm`, { type: mime });
+      const localUrl = URL.createObjectURL(blob);
+      trackObjectUrl(localUrl);
+      const optimistic: LocalMessage = {
+        seq: nextSeq(),
+        id: 0,
+        clientMsgId,
+        fromUserId: myId,
+        toUserId: isGroup ? 0 : conversationId,
+        groupId: isGroup ? conversationId : null,
+        type: 'voice',
+        attachment: { id: 0, kind: 'voice', name: '语音', size: blob.size, mime },
+        localUrl,
+        uploading: 0,
+        content: '[语音]',
+        status: 0,
+        createdAt: new Date().toISOString(),
+        pending: true,
+      };
+      setMessages((previous) => capMessages([...previous, optimistic]));
+      beginPending(clientMsgId);
+      try {
+        const { attachment } = await attachmentApi.upload(
+          file,
+          (percent) => setMessages((previous) => previous.map((m) => (m.clientMsgId === clientMsgId ? { ...m, uploading: percent } : m))),
+          'voice'
+        );
+        setMessages((previous) =>
+          previous.map((m) => (m.clientMsgId === clientMsgId ? { ...m, attachment, uploading: undefined } : m))
+        );
+        armPendingTimeout(clientMsgId);
+        await deliverMedia(clientMsgId, { type: 'voice', attachmentId: attachment.id });
+      } catch (error) {
+        setMessages((previous) =>
+          previous.map((m) => (m.clientMsgId === clientMsgId ? { ...m, pending: false, failed: true, uploading: undefined } : m))
+        );
+        pushToast({ kind: 'error', title: '语音发送失败', body: error instanceof ApiError ? error.message : undefined });
+      }
+    },
+    [conversationId, isGroup, myId, nextSeq, beginPending, armPendingTimeout, deliverMedia, pushToast, trackObjectUrl]
+  );
+
+  const startRecording = useCallback(async () => {
+    if (recording) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      pushToast({ kind: 'warning', title: '当前浏览器不支持录音' });
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recordChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        const blob = new Blob(recordChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        if (blob.size > 0) void sendVoice(blob);
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+      setRecordSeconds(0);
+      recordTimerRef.current = window.setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+    } catch {
+      pushToast({ kind: 'error', title: '无法访问麦克风', body: '请在浏览器设置中允许麦克风权限' });
+    }
+  }, [recording, pushToast, sendVoice]);
+
+  const stopRecording = useCallback((cancel = false) => {
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    if (recordTimerRef.current !== null) {
+      window.clearInterval(recordTimerRef.current);
+      recordTimerRef.current = null;
+    }
+    setRecording(false);
+    if (!recorder) return;
+    if (cancel) {
+      recorder.onstop = () => {
+        recorder.stream.getTracks().forEach((track) => track.stop());
+      };
+      recordChunksRef.current = [];
+    }
+    if (recorder.state !== 'inactive') recorder.stop();
+  }, []);
+
+  // Release the microphone if the window unmounts mid-recording.
+  useEffect(() => () => stopRecording(true), [stopRecording]);
+
   const submit = useCallback(() => {
     const content = draft.trim();
     if (!content || !conversationId || sending) return;
 
     const clientMsgId = uid();
     const mentions = isGroup ? mentioned : [];
+    const quoteId = quote?.id && quote.id > 0 ? quote.id : null;
     const optimistic: LocalMessage = {
       seq: nextSeq(),
       id: 0,
@@ -1030,6 +1221,10 @@ export const ChatWindow = memo(function ChatWindow({
       groupId: isGroup ? conversationId : null,
       type: 'text',
       mentions,
+      quoteId,
+      quote: quote
+        ? { id: quote.id, content: quote.content, type: quote.type ?? 'text', fromUserId: quote.fromUserId, recalled: Boolean(quote.recalled) }
+        : null,
       content,
       status: 0,
       createdAt: new Date().toISOString(),
@@ -1039,10 +1234,11 @@ export const ChatWindow = memo(function ChatWindow({
     setDraft('');
     setMentioned([]);
     setMentionOpen(false);
+    setQuote(null);
     beginPending(clientMsgId);
     armPendingTimeout(clientMsgId);
-    void deliver(clientMsgId, content, mentions);
-  }, [draft, conversationId, sending, myId, isGroup, mentioned, nextSeq, beginPending, armPendingTimeout, deliver]);
+    void deliver(clientMsgId, content, mentions, quoteId);
+  }, [draft, conversationId, sending, myId, isGroup, mentioned, quote, nextSeq, beginPending, armPendingTimeout, deliver]);
 
   const onSubmit = useCallback(
     (event: FormEvent) => {
@@ -1107,11 +1303,162 @@ export const ChatWindow = memo(function ChatWindow({
   }, []);
 
   // -------------------------------------------------------------------------
+  // Message actions (context menu: 撤回 / 引用 / 转发 / 复制 / 收藏 / 删除)
+  // -------------------------------------------------------------------------
+  const openMessageMenu = useCallback((message: LocalMessage, x: number, y: number) => {
+    setMenu({ message, x, y });
+  }, []);
+
+  const closeMessageMenu = useCallback(() => setMenu(null), []);
+
+  const recallMessage = useCallback(
+    async (message: LocalMessage) => {
+      setMenu(null);
+      try {
+        await messageApi.recall(message.id);
+        setMessages((previous) =>
+          previous.map((m) => (m.id === message.id ? { ...m, recalled: true, content: '' } : m))
+        );
+      } catch (error) {
+        pushToast({ kind: 'error', title: '撤回失败', body: error instanceof ApiError ? error.message : undefined });
+      }
+    },
+    [pushToast]
+  );
+
+  const deleteMessage = useCallback((message: LocalMessage) => {
+    setMenu(null);
+    // Local-first: remove immediately, persist in the background.
+    setMessages((previous) => previous.filter((m) => m.id !== message.id || m.id === 0));
+    void messageApi.remove(message.id).catch(() => {});
+  }, []);
+
+  const copyMessage = useCallback(
+    async (message: LocalMessage) => {
+      setMenu(null);
+      try {
+        await navigator.clipboard.writeText(message.content);
+        pushToast({ kind: 'success', title: '已复制' });
+      } catch {
+        pushToast({ kind: 'warning', title: '复制失败，请手动选择文本' });
+      }
+    },
+    [pushToast]
+  );
+
+  const favoriteMessage = useCallback(
+    async (message: LocalMessage) => {
+      setMenu(null);
+      try {
+        await favoriteApi.add(message.id, `${isGroup ? 'g' : 'd'}:${conversationId}`);
+        pushToast({ kind: 'success', title: '已收藏' });
+      } catch (error) {
+        pushToast({ kind: 'error', title: '收藏失败', body: error instanceof ApiError ? error.message : undefined });
+      }
+    },
+    [conversationId, isGroup, pushToast]
+  );
+
+  const startQuote = useCallback((message: LocalMessage) => {
+    setMenu(null);
+    setQuote(message);
+    composerRef.current?.focus();
+  }, []);
+
+  const startForward = useCallback((message: LocalMessage) => {
+    setMenu(null);
+    setForwardPicked(new Set());
+    setForwardOf(message);
+  }, []);
+
+  // Load the friend/group targets when the forward picker opens.
+  useEffect(() => {
+    if (!forwardOf) return undefined;
+    let cancelled = false;
+    void friendApi.list().then((r) => !cancelled && setForwardFriends(r.friends)).catch(() => {});
+    void groupApi.list().then((r) => !cancelled && setForwardGroups(r.groups)).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [forwardOf]);
+
+  const toggleForwardPick = useCallback((key: string) => {
+    setForwardPicked((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const doForward = useCallback(
+    async (targetUserIds: number[], targetGroupIds: number[]) => {
+      const message = forwardOf;
+      setForwardOf(null);
+      if (!message || message.id <= 0) return;
+      try {
+        const result = await messageApi.forward(message.id, targetUserIds, targetGroupIds);
+        pushToast({ kind: 'success', title: `已转发给 ${result.forwarded} 个会话` });
+      } catch (error) {
+        pushToast({ kind: 'error', title: '转发失败', body: error instanceof ApiError ? error.message : undefined });
+      }
+    },
+    [forwardOf, pushToast]
+  );
+
+  const confirmForward = useCallback(() => {
+    const userIds: number[] = [];
+    const groupIds: number[] = [];
+    for (const key of forwardPicked) {
+      const [kind, id] = key.split(':');
+      if (kind === 'd') userIds.push(Number(id));
+      else groupIds.push(Number(id));
+    }
+    if (userIds.length + groupIds.length === 0) return;
+    void doForward(userIds, groupIds);
+  }, [forwardPicked, doForward]);
+
+  const onContextMenu = useCallback(
+    (message: LocalMessage, x: number, y: number) => openMessageMenu(message, x, y),
+    [openMessageMenu]
+  );
+
+  // -------------------------------------------------------------------------
+  // Focus a message chosen in 查找聊天记录 — load older pages until it appears.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (!focusMessageId) return;
+    // Wait until THIS conversation's baseline page has loaded — otherwise a
+    // switch-in would scan the previous conversation's rows (and could fetch
+    // older pages with a stale cursor).
+    if (loadedConvRef.current !== conversationId) return;
+    const element = scrollRef.current?.querySelector<HTMLElement>(`[data-message-id="${focusMessageId}"]`);
+    if (element) {
+      element.scrollIntoView({ block: 'center' });
+      element.classList.add('msg-focus');
+      window.setTimeout(() => element.classList.remove('msg-focus'), 2000);
+      focusTriesRef.current = 0;
+      onFocusConsumed?.();
+      return;
+    }
+    if (loadingMore) return; // wait for the in-flight page
+    if (hasMore && focusTriesRef.current < 10) {
+      focusTriesRef.current += 1;
+      void loadOlder();
+      return;
+    }
+    // Not in the loaded window (or predates a clear) — give up loudly.
+    focusTriesRef.current = 0;
+    pushToast({ kind: 'info', title: '无法定位该消息' });
+    onFocusConsumed?.();
+  }, [focusMessageId, conversationId, messages, hasMore, loadingMore, loadOlder, onFocusConsumed, pushToast]);
+
+  // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
   const displayPeer = peerHint ?? peer ?? null;
   const displayGroup = groupHint ?? group ?? null;
-  const peerName = displayPeer?.nickname ?? displayPeer?.username ?? '?';
+  const peerName = displayPeer ? displayName(displayPeer) : '?';
   const peerAvatar = displayPeer?.avatar ?? null;
   const groupName = displayGroup?.name ?? `群聊 #${conversationId}`;
   const groupAvatar = displayGroup?.avatar ?? null;
@@ -1132,7 +1479,7 @@ export const ChatWindow = memo(function ChatWindow({
   // Authorization header, so the token rides as `?token=` (see attachmentRawUrl).
   const token = session.getAccessToken();
   const mediaSrcOf = (message: LocalMessage): string | null => {
-    if (message.type !== 'image' && message.type !== 'file') return null;
+    if (message.type !== 'image' && message.type !== 'file' && message.type !== 'voice') return null;
     if (message.localUrl && (!message.attachment || message.attachment.id === 0)) return message.localUrl;
     return message.attachment && message.attachment.id > 0
       ? attachmentRawUrl(message.attachment.id, token)
@@ -1149,11 +1496,13 @@ export const ChatWindow = memo(function ChatWindow({
           aria-label="返回"
           onClick={onBack}
         >
-          ‹
+          <Icon name="chevron-left" size={20} />
         </button>
         <Avatar name={isGroup ? groupName : peerName} avatar={isGroup ? groupAvatar : peerAvatar} size={38} />
         <div className="chat-header-info">
-          <div className="chat-header-name">{isGroup ? groupName : displayPeer?.nickname ?? `用户 #${conversationId}`}</div>
+          <div className="chat-header-name">
+            {isGroup ? groupName : displayPeer ? displayName(displayPeer) : `用户 #${conversationId}`}
+          </div>
           <div className="chat-header-sub">
             {isGroup ? (
               `${onlineMemberCount} 人在线 · 共 ${memberCount} 人`
@@ -1164,16 +1513,18 @@ export const ChatWindow = memo(function ChatWindow({
             )}
           </div>
         </div>
-        {isGroup && (
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm chat-header-action"
-            data-testid="group-info-open"
-            onClick={() => setGroupInfoOpen(true)}
-          >
-            群信息
-          </button>
-        )}
+        {/* Everything conversation-wide lives in 聊天信息 now — one entry
+            point, like WeChat's ⋯, instead of three header buttons. */}
+        <button
+          type="button"
+          className="icon-btn chat-header-action chat-manage"
+          data-testid="chat-manage-open"
+          title="聊天信息"
+          aria-label="聊天信息"
+          onClick={onManage}
+        >
+          <Icon name="more" size={20} />
+        </button>
       </header>
 
       {isGroup && displayGroup?.announcement && (
@@ -1231,6 +1582,7 @@ export const ChatWindow = memo(function ChatWindow({
               mediaSrc={mediaSrcOf(message)}
               onOpenImage={setPreviewSrc}
               onRetry={retry}
+              onContextMenu={onContextMenu}
             />
           );
         })}
@@ -1251,6 +1603,21 @@ export const ChatWindow = memo(function ChatWindow({
       />
 
       <form className="chat-composer" onSubmit={onSubmit} ref={composerFormRef}>
+        {quote && (
+          <div className="composer-quote" data-testid="composer-quote">
+            <span className="composer-quote-text">
+              引用：{quote.recalled ? '消息已撤回' : (quote.content || '[消息]').slice(0, 80)}
+            </span>
+            <button
+              type="button"
+              className="icon-btn composer-quote-close"
+              aria-label="取消引用"
+              onClick={() => setQuote(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
         {isGroup && mentionOpen && (
           <div className="mention-popover" data-testid="mention-popover">
             <div className="mention-popover-title">选择要提醒的人</div>
@@ -1277,7 +1644,7 @@ export const ChatWindow = memo(function ChatWindow({
               data-testid="attach-image"
               onClick={() => imageInputRef.current?.click()}
             >
-              <PhotoIcon />
+              <Icon name="image" size={18} className="attach-icon" />
               图片
             </button>
             <button
@@ -1286,7 +1653,7 @@ export const ChatWindow = memo(function ChatWindow({
               data-testid="attach-file"
               onClick={() => fileInputRef.current?.click()}
             >
-              <DocumentIcon />
+              <Icon name="file" size={18} className="attach-icon" />
               文件
             </button>
           </div>
@@ -1323,6 +1690,7 @@ export const ChatWindow = memo(function ChatWindow({
             }}
             placeholder={frozen ? '当前窗口已冻结' : '消息'}
             rows={2}
+            maxLength={2000}
             disabled={frozen}
           />
 
@@ -1341,7 +1709,7 @@ export const ChatWindow = memo(function ChatWindow({
                   setMentionOpen((open) => !open);
                 }}
               >
-                <MentionIcon />
+                <Icon name="mention" size={22} className="composer-icon" />
               </button>
             )}
             <button
@@ -1356,7 +1724,7 @@ export const ChatWindow = memo(function ChatWindow({
                 setAttachOpen((open) => !open);
               }}
             >
-              <PlusCircleIcon />
+              <Icon name="plus-circle" size={22} className="composer-icon" />
             </button>
             <button
               type="button"
@@ -1370,7 +1738,25 @@ export const ChatWindow = memo(function ChatWindow({
                 setEmojiOpen((open) => !open);
               }}
             >
-              <EmojiIcon />
+              <Icon name="emoji" size={22} className="composer-icon" />
+            </button>
+            <button
+              type="button"
+              className={`icon-btn composer-tool ${recording ? 'recording' : ''}`}
+              data-testid="composer-voice"
+              aria-label={recording ? `停止录音 ${recordSeconds}s` : '录音'}
+              title={recording ? '点击停止录音' : '录音'}
+              disabled={frozen}
+              onClick={() => (recording ? stopRecording(false) : void startRecording())}
+            >
+              {recording ? (
+                <>
+                  <Icon name="record" size={14} />
+                  {recordSeconds}s
+                </>
+              ) : (
+                <Icon name="mic" size={20} />
+              )}
             </button>
             <button
               type="submit"
@@ -1401,16 +1787,106 @@ export const ChatWindow = memo(function ChatWindow({
         </div>
       )}
 
-      {isGroup && displayGroup && (
-        <GroupInfoDialog
-          open={groupInfoOpen}
-          group={displayGroup}
-          members={members}
-          myId={myId}
-          frozen={frozen}
-          presence={presence}
-          onClose={() => setGroupInfoOpen(false)}
-        />
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={closeMessageMenu} testId="msg-menu">
+          {menu.message.fromUserId === myId &&
+            !menu.message.recalled &&
+            menu.message.id > 0 &&
+            Date.now() - new Date(menu.message.createdAt).getTime() < 2 * 60 * 1000 && (
+              <button type="button" className="msg-menu-item" onClick={() => void recallMessage(menu.message)}>
+                撤回
+              </button>
+            )}
+          <button type="button" className="msg-menu-item" onClick={() => startQuote(menu.message)}>
+            引用回复
+          </button>
+          <button type="button" className="msg-menu-item" onClick={() => startForward(menu.message)}>
+            转发
+          </button>
+          {menu.message.type !== 'image' && menu.message.type !== 'file' && (
+            <button type="button" className="msg-menu-item" onClick={() => void copyMessage(menu.message)}>
+              复制
+            </button>
+          )}
+          {menu.message.id > 0 && (
+            <button type="button" className="msg-menu-item" onClick={() => void favoriteMessage(menu.message)}>
+              收藏
+            </button>
+          )}
+          <button type="button" className="msg-menu-item danger" onClick={() => deleteMessage(menu.message)}>
+            删除
+          </button>
+        </ContextMenu>
+      )}
+
+      {forwardOf && (
+        <div className="dialog-overlay" onMouseDown={() => setForwardOf(null)} data-testid="forward-dialog">
+          <div className="dialog" onMouseDown={(event) => event.stopPropagation()}>
+            <header className="dialog-head">
+              <span className="dialog-title">转发给</span>
+              <button type="button" className="icon-btn" onClick={() => setForwardOf(null)} aria-label="关闭">
+                ×
+              </button>
+            </header>
+            <div className="dialog-body">
+              {forwardFriends.length === 0 && forwardGroups.length === 0 && (
+                <div className="panel-empty">还没有可转发的会话</div>
+              )}
+              {forwardFriends.length > 0 && (
+                <>
+                  <div className="forward-section-title">好友</div>
+                  {forwardFriends.map((friend) => {
+                    const key = `d:${friend.id}`;
+                    return (
+                      <label key={key} className="forward-row">
+                        <input
+                          type="checkbox"
+                          checked={forwardPicked.has(key)}
+                          onChange={() => toggleForwardPick(key)}
+                        />
+                        <Avatar name={displayName(friend)} avatar={friend.avatar} size={30} />
+                        <span>{displayName(friend)}</span>
+                      </label>
+                    );
+                  })}
+                </>
+              )}
+              {forwardGroups.length > 0 && (
+                <>
+                  <div className="forward-section-title">群聊</div>
+                  {forwardGroups.map((grp) => {
+                    const key = `g:${grp.id}`;
+                    return (
+                      <label key={key} className="forward-row">
+                        <input
+                          type="checkbox"
+                          checked={forwardPicked.has(key)}
+                          onChange={() => toggleForwardPick(key)}
+                        />
+                        <Avatar name={grp.name} avatar={grp.avatar} size={30} />
+                        <span>{grp.name}</span>
+                      </label>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+            <footer className="dialog-foot">
+              <button type="button" className="btn" onClick={() => setForwardOf(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                data-testid="forward-confirm"
+                disabled={forwardPicked.size === 0}
+                onClick={confirmForward}
+              >
+                转发
+              </button>
+            </footer>
+          </div>
+        </div>
       )}
     </section>
   );

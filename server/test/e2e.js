@@ -44,22 +44,39 @@ async function check(name, fn) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const uniq = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
-async function api(method, url, { token, body } = {}) {
+async function api(method, url, { token, body, jar } = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  // Cookie jar: the refresh token now travels in an HttpOnly cookie, so the
+  // browser-shaped flows (refresh / reuse / logout) must replay Set-Cookie.
+  if (jar && jar.size) {
+    headers.cookie = [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+    // Echo the double-submit CSRF token for the cookie-authenticated endpoints.
+    if (jar.has('stella_csrf')) headers['x-csrf-token'] = jar.get('stella_csrf');
+  }
   const res = await fetch(BASE + url, {
     method,
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  const setCookies = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+  if (jar) {
+    for (const raw of setCookies) {
+      const [pair] = raw.split(';');
+      const eq = pair.indexOf('=');
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1);
+      if (value === '' || value === 'deleted') jar.delete(name);
+      else jar.set(name, value);
+    }
+  }
   let payload = null;
   try {
     payload = await res.json();
   } catch {
     /* empty body */
   }
-  return { status: res.status, body: payload, data: payload && payload.data };
+  return { status: res.status, body: payload, data: payload && payload.data, setCookies };
 }
 
 /** Opens a WS connection and records every frame it receives. */
@@ -115,6 +132,16 @@ async function startServer() {
       SYSTEM_NOTICE_MS: '2500',
       LOG_LEVEL: 'warn',
       DB_NAME: process.env.DB_NAME || 'stella_im',
+      // This suite registers many accounts from one IP in seconds; the request
+      // rate limiter is disabled here (the login-failure throttle is separate
+      // and still exercised).
+      RATE_LIMIT_DISABLED: '1',
+      // Exercise the content denylist deterministically.
+      CONTENT_FILTER_WORDS: 'blockedword',
+      // Disable the concurrent-refresh grace window so a replayed rotated token
+      // is deterministically classified as reuse (the benign path is exercised
+      // by the browser multi-tab flow, not here).
+      REFRESH_GRACE_MS: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -140,8 +167,8 @@ async function startServer() {
 // ---------------------------------------------------------------------------
 async function run() {
   const tag = uniq();
-  const alice = { username: `alice_${tag}`.slice(0, 32), password: 'passw0rd', nickname: 'Alice' };
-  const bob = { username: `bob_${tag}`.slice(0, 32), password: 'passw0rd', nickname: 'Bob' };
+  const alice = { username: `alice_${tag}`.slice(0, 32), password: 'passw0rd', nickname: 'Alice', jar: new Map() };
+  const bob = { username: `bob_${tag}`.slice(0, 32), password: 'passw0rd', nickname: 'Bob', jar: new Map() };
 
   console.log(`\nStella IM end-to-end test  (port ${PORT}, users ${alice.username} / ${bob.username})\n`);
 
@@ -159,12 +186,13 @@ async function run() {
   });
 
   await check('register creates an account and returns tokens', async () => {
-    const r = await api('POST', '/api/auth/register', { body: alice });
+    const r = await api('POST', '/api/auth/register', { body: alice, jar: alice.jar });
     assert.strictEqual(r.status, 201, JSON.stringify(r.body));
-    assert.ok(r.data.accessToken && r.data.refreshToken);
+    assert.ok(r.data.accessToken, 'missing accessToken');
+    assert.strictEqual(r.data.refreshToken, undefined, 'refresh token must not be in the body');
+    assert.ok(alice.jar.has('stella_rt'), 'refresh cookie was not set');
     alice.user = r.data.user;
     alice.access = r.data.accessToken;
-    alice.refresh = r.data.refreshToken;
   });
 
   await check('duplicate username is rejected', async () => {
@@ -185,18 +213,20 @@ async function run() {
   });
 
   await check('register second user (bob)', async () => {
-    const r = await api('POST', '/api/auth/register', { body: bob });
+    const r = await api('POST', '/api/auth/register', { body: bob, jar: bob.jar });
     assert.strictEqual(r.status, 201, JSON.stringify(r.body));
     bob.user = r.data.user;
     bob.access = r.data.accessToken;
-    bob.refresh = r.data.refreshToken;
   });
 
   await check('login returns a fresh session', async () => {
-    const r = await api('POST', '/api/auth/login', { body: { username: alice.username, password: alice.password } });
+    const r = await api('POST', '/api/auth/login', {
+      body: { username: alice.username, password: alice.password },
+      jar: alice.jar,
+    });
     assert.strictEqual(r.status, 200);
     alice.access = r.data.accessToken;
-    alice.refresh = r.data.refreshToken;
+    assert.strictEqual(r.data.refreshToken, undefined, 'refresh token must not be in the body');
   });
 
   console.log('\nWebSocket handshake authentication');
@@ -378,17 +408,20 @@ async function run() {
   });
 
   console.log('\nToken governance');
-  await check('refresh rotates the token pair', async () => {
-    const r = await api('POST', '/api/auth/refresh', { body: { refreshToken: alice.refresh } });
+  await check('refresh rotates the token pair (cookie-based)', async () => {
+    const before = alice.jar.get('stella_rt');
+    alice.staleCookie = before;
+    const r = await api('POST', '/api/auth/refresh', { jar: alice.jar });
     assert.strictEqual(r.status, 200, JSON.stringify(r.body));
-    assert.notStrictEqual(r.data.refreshToken, alice.refresh, 'refresh token was not rotated');
-    alice.oldRefresh = alice.refresh;
+    assert.ok(r.data.accessToken, 'refresh did not return an access token');
+    assert.notStrictEqual(alice.jar.get('stella_rt'), before, 'refresh cookie was not rotated');
     alice.access = r.data.accessToken;
-    alice.refresh = r.data.refreshToken;
   });
 
   await check('reusing a rotated refresh token invalidates the whole family', async () => {
-    const r = await api('POST', '/api/auth/refresh', { body: { refreshToken: alice.oldRefresh } });
+    // Replay the *previous* cookie value (captured before rotation).
+    const stale = new Map([['stella_rt', alice.staleCookie]]);
+    const r = await api('POST', '/api/auth/refresh', { jar: stale });
     assert.strictEqual(r.status, 401);
     assert.strictEqual(r.body.code, 'REFRESH_REUSED');
   });
@@ -1309,6 +1342,207 @@ async function run() {
     form.append('file', new Blob([Buffer.from('x')], { type: 'text/plain' }), 'x.txt');
     const res = await fetch(`${BASE}/api/attachments`, { method: 'POST', body: form });
     assert.strictEqual(res.status, 401);
+  });
+
+  // -------------------------------------------------------------------------
+  // P1: account security, privacy switches, blocks, content filter
+  // -------------------------------------------------------------------------
+  console.log('\nAccount security, privacy & safety (P1)');
+
+  const p1a = { username: `p1a_${uniq()}`.slice(0, 32), password: 'passw0rd', nickname: 'P1A', jar: new Map() };
+  const p1b = { username: `p1b_${uniq()}`.slice(0, 32), password: 'passw0rd', nickname: 'P1B', jar: new Map() };
+
+  await check('P1: two fresh users register', async () => {
+    const a = await api('POST', '/api/auth/register', { body: p1a, jar: p1a.jar });
+    const b = await api('POST', '/api/auth/register', { body: p1b, jar: p1b.jar });
+    assert.strictEqual(a.status, 201, JSON.stringify(a.body));
+    assert.strictEqual(b.status, 201, JSON.stringify(b.body));
+    p1a.user = a.data.user;
+    p1b.user = b.data.user;
+    p1a.access = a.data.accessToken;
+    p1b.access = b.data.accessToken;
+  });
+
+  await check('P1: content filter blocks a denylisted nickname', async () => {
+    const r = await api('PATCH', '/api/auth/me', { token: p1a.access, body: { nickname: 'blockedword hi' } });
+    assert.strictEqual(r.status, 400);
+    assert.strictEqual(r.body.code, 'CONTENT_BLOCKED');
+  });
+
+  await check('P1: settings default on and toggling add-by-username hides from search', async () => {
+    const def = await api('GET', '/api/settings', { token: p1a.access });
+    assert.strictEqual(def.status, 200);
+    assert.strictEqual(def.data.settings.addByUsername, true);
+
+    const patched = await api('PATCH', '/api/settings', { token: p1b.access, body: { addByUsername: false } });
+    assert.strictEqual(patched.data.settings.addByUsername, false);
+
+    const search = await api('GET', `/api/friends/search?q=${encodeURIComponent(p1b.username)}`, { token: p1a.access });
+    assert.ok(!search.data.users.some((u) => u.id === p1b.user.id), 'p1b should be hidden from username search');
+
+    // Restore so later sections can add p1b by username.
+    await api('PATCH', '/api/settings', { token: p1b.access, body: { addByUsername: true } });
+  });
+
+  await check('P1: password change revokes other sessions, keeps current', async () => {
+    // Second login for p1a => a second session.
+    const second = { jar: new Map() };
+    const login2 = await api('POST', '/api/auth/login', { body: { username: p1a.username, password: p1a.password }, jar: second.jar });
+    assert.strictEqual(login2.status, 200);
+    second.access = login2.data.accessToken;
+
+    const before = await api('GET', '/api/auth/sessions', { token: p1a.access });
+    assert.ok(before.data.sessions.length >= 2, `expected >=2 sessions, got ${before.data.sessions.length}`);
+
+    const changed = await api('POST', '/api/auth/password', {
+      token: p1a.access,
+      body: { oldPassword: p1a.password, newPassword: 'newpass123' },
+    });
+    assert.strictEqual(changed.status, 200, JSON.stringify(changed.body));
+
+    // The other session's access token is dead; the current one still works.
+    const dead = await api('GET', '/api/auth/me', { token: second.access });
+    assert.strictEqual(dead.status, 401);
+    assert.strictEqual(dead.body.code, 'SESSION_REVOKED');
+    const alive = await api('GET', '/api/auth/me', { token: p1a.access });
+    assert.strictEqual(alive.status, 200, 'current session should survive a password change');
+
+    // Old password no longer works; the new one does.
+    const oldPw = await api('POST', '/api/auth/login', { body: { username: p1a.username, password: 'passw0rd' } });
+    assert.strictEqual(oldPw.status, 401);
+    const newPw = await api('POST', '/api/auth/login', { body: { username: p1a.username, password: 'newpass123' }, jar: p1a.jar });
+    assert.strictEqual(newPw.status, 200);
+    p1a.access = newPw.data.accessToken;
+  });
+
+  await check('P1: block gate refuses messages in both directions', async () => {
+    // Befriend first (default requireVerification = true).
+    const req = await api('POST', '/api/friends/requests', { token: p1a.access, body: { toUserId: p1b.user.id } });
+    assert.strictEqual(req.status, 201, JSON.stringify(req.body));
+    await api('POST', `/api/friends/requests/${req.data.request.id}/accept`, { token: p1b.access });
+
+    const blocked = await api('POST', '/api/friends/blocks', { token: p1a.access, body: { userId: p1b.user.id } });
+    assert.strictEqual(blocked.status, 201);
+
+    const fromBlocker = await api('POST', '/api/messages', {
+      token: p1a.access,
+      body: { toUserId: p1b.user.id, content: 'x', clientMsgId: `blk-${uniq()}` },
+    });
+    assert.strictEqual(fromBlocker.status, 403);
+    assert.strictEqual(fromBlocker.body.code, 'BLOCKED');
+
+    const fromBlocked = await api('POST', '/api/messages', {
+      token: p1b.access,
+      body: { toUserId: p1a.user.id, content: 'y', clientMsgId: `blk-${uniq()}` },
+    });
+    assert.strictEqual(fromBlocked.status, 403);
+    assert.strictEqual(fromBlocked.body.code, 'BLOCKED');
+
+    const list = await api('GET', '/api/friends/blocks', { token: p1a.access });
+    assert.ok(list.data.blocks.some((b) => b.id === p1b.user.id));
+
+    const unblocked = await api('DELETE', `/api/friends/blocks/${p1b.user.id}`, { token: p1a.access });
+    assert.strictEqual(unblocked.data.removed, true);
+  });
+
+  await check('P1: friend remark is private and persisted', async () => {
+    const set = await api('PATCH', `/api/friends/${p1b.user.id}`, { token: p1a.access, body: { remark: '同事' } });
+    assert.strictEqual(set.status, 200);
+    assert.strictEqual(set.data.remark, '同事');
+    const mine = await api('GET', '/api/friends', { token: p1a.access });
+    assert.strictEqual(mine.data.friends.find((f) => f.id === p1b.user.id).remark, '同事');
+    const theirs = await api('GET', '/api/friends', { token: p1b.access });
+    assert.strictEqual(theirs.data.friends.find((f) => f.id === p1a.user.id).remark, null, 'remark must be private');
+  });
+
+  await check('P1: account deletion + restore within the cooling window', async () => {
+    const victim = { username: `p1d_${uniq()}`.slice(0, 32), password: 'passw0rd', nickname: 'P1D', jar: new Map() };
+    const reg = await api('POST', '/api/auth/register', { body: victim, jar: victim.jar });
+    victim.access = reg.data.accessToken;
+    const del = await api('DELETE', '/api/auth/me', { token: victim.access, body: { password: victim.password } });
+    assert.strictEqual(del.status, 200);
+    assert.ok(del.data.coolingDays >= 1);
+
+    const dead = await api('POST', '/api/auth/login', { body: { username: victim.username, password: victim.password } });
+    assert.strictEqual(dead.status, 401);
+
+    const restored = await api('POST', '/api/auth/restore', { body: { username: victim.username, password: victim.password }, jar: victim.jar });
+    assert.strictEqual(restored.status, 200, JSON.stringify(restored.body));
+
+    const back = await api('POST', '/api/auth/login', { body: { username: victim.username, password: victim.password } });
+    assert.strictEqual(back.status, 200);
+  });
+
+  await check('P1: reports are accepted and receipted', async () => {
+    const r = await api('POST', '/api/reports', {
+      token: p1a.access,
+      body: { targetType: 'user', targetId: p1b.user.id, reason: 'spam', detail: 'test' },
+    });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    const mine = await api('GET', '/api/reports/mine', { token: p1a.access });
+    assert.ok(mine.data.reports.some((x) => x.id === r.data.id));
+  });
+
+  await check('P2: conversation pin/mute is persisted and one flag never clobbers the other', async () => {
+    // Regression: the upsert used to placeholder the untouched flag with NULL,
+    // but `pinned`/`muted` are NOT NULL, so the *first* write for a conversation
+    // 500'd (strict mode) — 置顶 never persisted at all.
+    const pin = await api('PATCH', `/api/conversations/direct/${p1b.user.id}`, {
+      token: p1a.access,
+      body: { pinned: true },
+    });
+    assert.strictEqual(pin.status, 200, JSON.stringify(pin.body));
+    assert.strictEqual(pin.data.settings.pinned, true);
+    assert.strictEqual(pin.data.settings.muted, false);
+
+    const mute = await api('PATCH', `/api/conversations/direct/${p1b.user.id}`, {
+      token: p1a.access,
+      body: { muted: true },
+    });
+    assert.strictEqual(mute.status, 200, JSON.stringify(mute.body));
+    assert.strictEqual(mute.data.settings.muted, true);
+    assert.strictEqual(mute.data.settings.pinned, true, 'muting dropped the pin');
+
+    const unpin = await api('PATCH', `/api/conversations/direct/${p1b.user.id}`, {
+      token: p1a.access,
+      body: { pinned: false },
+    });
+    assert.strictEqual(unpin.status, 200, JSON.stringify(unpin.body));
+    assert.strictEqual(unpin.data.settings.pinned, false);
+    assert.strictEqual(unpin.data.settings.muted, true, 'unpinning dropped the mute');
+
+    const mine = await api('GET', '/api/conversations', { token: p1a.access });
+    assert.strictEqual(mine.status, 200, JSON.stringify(mine.body));
+    const row = mine.data.conversations.find(
+      (c) => c.peerKind === 'direct' && Number(c.peerId) === p1b.user.id
+    );
+    assert.ok(row, 'the conversation is missing from GET /api/conversations');
+    assert.strictEqual(row.pinned, false);
+    assert.strictEqual(row.muted, true);
+
+    // The other side is untouched — settings are per user.
+    const theirs = await api('GET', '/api/conversations', { token: p1b.access });
+    assert.strictEqual(
+      theirs.data.conversations.some((c) => c.peerKind === 'direct' && Number(c.peerId) === p1a.user.id),
+      false,
+      'pin/mute leaked to the peer'
+    );
+  });
+
+  await check('P2: a group conversation can be pinned too', async () => {
+    const pin = await api('PATCH', `/api/conversations/group/${groupId}`, {
+      token: g1.accessToken,
+      body: { pinned: true },
+    });
+    assert.strictEqual(pin.status, 200, JSON.stringify(pin.body));
+    assert.strictEqual(pin.data.settings.pinned, true);
+
+    const list = await api('GET', '/api/conversations', { token: g1.accessToken });
+    const row = list.data.conversations.find(
+      (c) => c.peerKind === 'group' && Number(c.peerId) === groupId
+    );
+    assert.ok(row, 'the group conversation is missing from the list');
+    assert.strictEqual(row.pinned, true);
   });
 
   g1.ws.close();

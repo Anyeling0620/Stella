@@ -6,6 +6,8 @@ const hub = require('./hub');
 const { CLIENT, SERVER, CLOSE } = require('./protocol');
 const jwtUtil = require('../utils/jwt');
 const userRepo = require('../repositories/userRepo');
+const sessionRepo = require('../repositories/sessionRepo');
+const { isAllowedOrigin } = require('../utils/origin');
 const messageService = require('../services/messageService');
 const presenceService = require('../services/presenceService');
 const { createLogger } = require('../utils/logger');
@@ -62,6 +64,14 @@ function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附�
       return rejectHandshake(socket, 404, 'NOT_FOUND', '未知的 WebSocket 路径');
     }
 
+    // Origin allowlist (defence in depth against cross-site socket initiation).
+    // Browsers always send Origin on WS handshakes; non-browser clients may not.
+    const origin = req.headers['origin'];
+    if (origin && !isAllowedOrigin(origin)) {
+      log.warn(`handshake rejected: bad origin ${origin}`);
+      return rejectHandshake(socket, 403, 'FORBIDDEN_ORIGIN', '请求来源不被允许');
+    }
+
     const token = extractToken(req, url);
     if (!token) {
       log.warn('handshake rejected: missing token');
@@ -81,21 +91,29 @@ function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附�
       return rejectHandshake(socket, 401, 'TOKEN_INVALID', '登录凭证类型错误');
     }
 
-    // Async DB check for token_version (revoked-on-logout sessions).
+    // Async DB check for token_version (revoked-on-logout sessions) and the
+    // per-device session lineage (active-session management).
     userRepo
       .findById(payload.sub)
-      .then((user) => {
+      .then(async (user) => {
         if (!user) {
           return rejectHandshake(socket, 401, 'USER_NOT_FOUND', '用户不存在');
         }
         if (Number(user.token_version) !== Number(payload.tv)) {
           return rejectHandshake(socket, 401, 'SESSION_REVOKED', '登录状态已失效');
         }
+        if (user.deleted_at) {
+          return rejectHandshake(socket, 401, 'ACCOUNT_DELETED', '账号已注销');
+        }
+        if (payload.sid && !(await sessionRepo.isActive(payload.sid))) {
+          return rejectHandshake(socket, 401, 'SESSION_REVOKED', '该设备登录已失效');
+        }
         wss.handleUpgrade(req, socket, head, (ws) => {
           wss.emit('connection', ws, req, {
             userId: Number(payload.sub),
             username: payload.username || user.username,
             tokenVersion: Number(payload.tv),
+            sid: payload.sid || null,
             tokenExpAt: jwtUtil.expiresAtMsOf(token),
           });
         });
@@ -165,7 +183,13 @@ function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附�
                 clientMsgId: frame.clientMsgId,
                 mentions: frame.mentions,
                 attachmentId: frame.attachmentId,
+                quoteId: frame.quoteId,
               });
+              return; // fan-out already happened inside the service
+            }
+
+            case CLIENT.CHAT_RECALL: {
+              await messageService.recall({ userId: ws.ctx.userId, messageId: frame.messageId });
               return; // fan-out already happened inside the service
             }
 
@@ -238,6 +262,7 @@ function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附�
   // ---------------------------------------------------------------------------
   const authCheck = setInterval(async () => {
     const verdicts = new Map(); // userId -> boolean valid
+    const sidVerdicts = new Map(); // sid -> boolean valid
     for (const ws of [...hub.all]) {
       const uid = ws.ctx.userId;
 
@@ -249,13 +274,30 @@ function attachWebSocket(httpServer) { // 这是一个将WebSocket服务器附�
       if (!verdicts.has(uid)) {
         try {
           const user = await userRepo.findById(uid);
-          verdicts.set(uid, !!user && Number(user.token_version) === ws.ctx.tokenVersion);
+          verdicts.set(uid, !!user && !user.deleted_at && Number(user.token_version) === ws.ctx.tokenVersion);
         } catch {
           verdicts.set(uid, true); // DB blip must not drop healthy sessions
         }
       }
       if (verdicts.get(uid) === false) {
         ws.close(CLOSE.SESSION_REVOKED, 'session revoked');
+        continue;
+      }
+
+      // Per-device revocation safety net (the immediate path closes sockets when
+      // a session is revoked; this catches anything missed).
+      const sid = ws.ctx.sid;
+      if (sid) {
+        if (!sidVerdicts.has(sid)) {
+          try {
+            sidVerdicts.set(sid, await sessionRepo.isActive(sid));
+          } catch {
+            sidVerdicts.set(sid, true);
+          }
+        }
+        if (sidVerdicts.get(sid) === false) {
+          ws.close(CLOSE.SESSION_REVOKED, 'session revoked');
+        }
       }
     }
   }, config.ws.authCheckIntervalMs);

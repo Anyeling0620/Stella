@@ -58,7 +58,9 @@ router.post(
     if (!req.file) throw AppError.badRequest('NO_FILE', '未收到文件');
 
     const mime = String(req.file.mimetype || 'application/octet-stream').toLowerCase();
+    const wantsVoice = String((req.body && req.body.kind) || '') === 'voice';
     const isImage = attachmentRepo.isImageMime(mime);
+    const isVoice = wantsVoice && attachmentRepo.isAudioMime(mime);
 
     // Images are capped tighter than generic files; multer already bounded the
     // generic case at the hard limit.
@@ -70,7 +72,7 @@ router.post(
 
     const attachment = await attachmentRepo.create({
       uploaderId: req.userId,
-      kind: isImage ? 'image' : 'file',
+      kind: isImage ? 'image' : isVoice ? 'voice' : 'file',
       originalName: safeOriginalName(req.file.originalname),
       storedName: req.file.filename,
       mime,
@@ -99,6 +101,9 @@ router.get(
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (row.kind === 'image') {
       res.setHeader('Content-Type', attachmentRepo.isImageMime(row.mime) ? row.mime : 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encoded}`);
+    } else if (row.kind === 'voice') {
+      res.setHeader('Content-Type', attachmentRepo.isAudioMime(row.mime) ? row.mime : 'audio/webm');
       res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encoded}`);
     } else {
       res.setHeader('Content-Type', 'application/octet-stream');

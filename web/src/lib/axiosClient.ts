@@ -1,5 +1,5 @@
 import axios, { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios';
-import { API, AUTH_FREE_PATHS, REQUEST_POLICY } from '../config';
+import { API, AUTH_FREE_PATHS, CSRF_COOKIE, REQUEST_POLICY } from '../config';
 import { session } from './session';
 import type { SessionPayload } from '../types';
 
@@ -137,9 +137,18 @@ const semaphore = new Semaphore(REQUEST_POLICY.maxConcurrent);
 const isAuthFree = (url?: string): boolean =>
   !!url && AUTH_FREE_PATHS.some((path) => url.includes(path));
 
+/** Reads a non-HttpOnly cookie (used for the CSRF double-submit token). */
+function readCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null;
+  const entry = document.cookie.split('; ').find((c) => c.startsWith(`${name}=`));
+  return entry ? decodeURIComponent(entry.slice(name.length + 1)) : null;
+}
+
 const client: AxiosInstance = axios.create({
   baseURL: API.base,
   timeout: 15_000,
+  // Send/receive the HttpOnly refresh + CSRF cookies.
+  withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
   // We surface non-2xx ourselves so retry/refresh logic can inspect them.
   validateStatus: (status) => status >= 200 && status < 300, 
@@ -149,6 +158,12 @@ client.interceptors.request.use((config) => {
   const token = session.getAccessToken();
   if (token && !isAuthFree(config.url)) {
     config.headers.set?.('Authorization', `Bearer ${token}`);
+  }
+  // Double-submit CSRF header on state-changing requests.
+  const method = (config.method ?? 'get').toLowerCase();
+  if (method !== 'get' && method !== 'head') {
+    const csrf = readCookie(CSRF_COOKIE);
+    if (csrf) config.headers.set?.('X-CSRF-Token', csrf);
   }
   return config;
 });
@@ -172,7 +187,7 @@ client.interceptors.response.use(
 // ---------------------------------------------------------------------------
 // Silent 401 refresh (single-flight)
 // ---------------------------------------------------------------------------
-const rawClient: AxiosInstance = axios.create({ baseURL: API.base, timeout: 15_000 });
+const rawClient: AxiosInstance = axios.create({ baseURL: API.base, timeout: 15_000, withCredentials: true });
 
 let refreshInFlight: Promise<string> | null = null;
 
@@ -190,14 +205,16 @@ export function refreshAccessToken(): Promise<string> { // 这是一个用于刷
 }
 
 async function performRefresh(): Promise<string> {
-  const refreshToken = session.getRefreshToken();
-  if (!refreshToken) {
-    expireSession('NO_REFRESH_TOKEN');
-    throw new ApiError(401, 'NO_REFRESH_TOKEN', '登录状态已失效，请重新登录');
-  }
-
   try {
-    const response = await rawClient.post('/api/auth/refresh', { refreshToken });
+    // The refresh token travels in the HttpOnly cookie, not the body. The
+    // double-submit CSRF header is required by the server when the cookie flow
+    // is in use.
+    const csrf = readCookie(CSRF_COOKIE);
+    const response = await rawClient.post(
+      '/api/auth/refresh',
+      undefined,
+      csrf ? { headers: { 'X-CSRF-Token': csrf } } : undefined
+    );
     const payload = response.data as { ok: boolean; data?: SessionPayload; code?: string; message?: string };
     if (!payload?.ok || !payload.data) {
       throw new ApiError(401, payload?.code ?? 'REFRESH_FAILED', payload?.message ?? '刷新登录状态失败');
@@ -373,14 +390,19 @@ export const api = {
 export async function uploadFile<T = unknown>(
   url: string,
   file: File,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  fields?: Record<string, string>
 ): Promise<T> {
   const post = (token: string | null) => {
     const form = new FormData();
     form.append('file', file);
+    if (fields) {
+      for (const [key, value] of Object.entries(fields)) form.append(key, value);
+    }
     return axios.post(`${API.base}${url}`, form, {
       // No explicit Content-Type: the browser adds the multipart boundary.
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      withCredentials: true,
       onUploadProgress: (event) => {
         if (onProgress && event.total) onProgress(Math.round((event.loaded / event.total) * 100));
       },

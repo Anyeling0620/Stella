@@ -23,4 +23,22 @@ const createLogger = (scope) => ({
   error: (...a) => emit('error', scope, a),
 });
 
-module.exports = { createLogger, logger: createLogger('app') };
+/** Masks an IPv4/IPv6 address for logs (keeps enough to correlate, not identify). */
+const maskIp = (ip) => {
+  if (!ip) return ip;
+  const value = String(ip);
+  const v4 = value.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (v4) return `${v4[1]}.${v4[2]}.*.*`;
+  if (value.includes(':')) return `${value.split(':').slice(0, 2).join(':')}:…`;
+  return value;
+};
+
+/** Masks an email as a***@example.com. */
+const maskEmail = (email) => {
+  if (!email) return email;
+  const [local, domain] = String(email).split('@');
+  if (!domain) return '***';
+  return `${local.slice(0, 1)}***@${domain}`;
+};
+
+module.exports = { createLogger, logger: createLogger('app'), maskIp, maskEmail };

@@ -3,6 +3,7 @@
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 
 const config = require('./config');
 const { createLogger } = require('./utils/logger');
@@ -12,6 +13,7 @@ const { attachWebSocket } = require('./ws/server');
 const { startSystemNoticeJob, stopSystemNoticeJob } = require('./jobs/systemNotice');
 const { notFoundHandler, errorHandler } = require('./middleware/error');
 const { deleteExpired } = require('./repositories/tokenRepo');
+const pushService = require('./services/pushService');
 const hub = require('./ws/hub');
 
 const log = createLogger('server');
@@ -30,12 +32,19 @@ app.use(
       if (config.cors.origins.includes(origin)) return cb(null, true);
       cb(null, false);
     },
+    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
     maxAge: 600,
   })
 );
 app.use(express.json({ limit: '256kb' }));
+app.use(cookieParser());
+// Trust the first proxy hop so `req.ip` reflects the real client when deployed
+// behind a reverse proxy (needed by the rate limiter / login throttle).
+app.set('trust proxy', 1);
+// Security headers (CSP for the JSON API, X-Frame-Options, HSTS in prod, …).
+app.use(require('./middleware/securityHeaders'));
 
 app.use((req, res, next) => {
   const started = Date.now();
@@ -61,9 +70,14 @@ app.get('/api/health', (req, res) => {
 });
 
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/settings', require('./routes/settings'));
 app.use('/api/friends', require('./routes/friends'));
 app.use('/api/messages', require('./routes/messages'));
+app.use('/api/conversations', require('./routes/conversations'));
+app.use('/api/favorites', require('./routes/favorites'));
 app.use('/api/groups', require('./routes/groups'));
+app.use('/api/reports', require('./routes/reports'));
+app.use('/api/push', require('./routes/push'));
 app.use('/api/attachments', require('./routes/attachments'));
 app.use('/api/system', require('./routes/system'));
 
@@ -75,6 +89,7 @@ app.use(errorHandler);
 // ---------------------------------------------------------------------------
 async function bootstrap() {
   await initDatabase();
+  pushService.init();
 
   const server = http.createServer(app);
   attachWebSocket(server);

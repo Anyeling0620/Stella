@@ -2,7 +2,7 @@
 
 const mysql = require('mysql2/promise');
 const config = require('../config');
-const { STATEMENTS, MIGRATIONS, INDEX_MIGRATIONS } = require('./schema');
+const { STATEMENTS, MIGRATIONS, INDEX_MIGRATIONS, ALTERS } = require('./schema');
 const { createLogger } = require('../utils/logger');
 
 const log = createLogger('db');
@@ -38,6 +38,20 @@ async function addIndexIfMissing(conn, { table, index, ddl }) {
   return true;
 }
 
+/** Applies a column *type* change only when the current definition lacks `contains`. */
+async function alterIfNeeded(conn, { table, column, contains, ddl }) {
+  const [rows] = await conn.query(
+    `SELECT COLUMN_TYPE AS t FROM information_schema.columns
+      WHERE table_schema = ? AND table_name = ? AND column_name = ? LIMIT 1`,
+    [config.db.database, table, column]
+  );
+  if (rows.length === 0) return false; // table/column not created yet
+  if (String(rows[0].t).includes(contains)) return false;
+  await conn.query(ddl);
+  log.info(`migrated: altered ${table}.${column}`);
+  return true;
+}
+
 /**
  * Creates the database (if missing) and every table (if missing).
  * Safe to run repeatedly and on every process boot.
@@ -65,6 +79,9 @@ async function initDatabase({ silent = false } = {}) {
     }
     for (const index of INDEX_MIGRATIONS) {
       await addIndexIfMissing(conn, index);
+    }
+    for (const alter of ALTERS) {
+      await alterIfNeeded(conn, alter);
     }
 
     if (!silent) {

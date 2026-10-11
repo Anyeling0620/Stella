@@ -27,6 +27,10 @@ const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'
 
 const isImageMime = (mime) => IMAGE_MIME.has(String(mime || '').toLowerCase());
 
+/** Audio types produced by browser MediaRecorder (voice messages). */
+const AUDIO_MIME = new Set(['audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-wav']);
+const isAudioMime = (mime) => AUDIO_MIME.has(String(mime || '').toLowerCase());
+
 const toDTO = (row) => {
   if (!row) return null;
   return {
@@ -57,7 +61,9 @@ const removeFile = (storedName) => fs.promises.unlink(absPathOf(storedName)).cat
 module.exports = {
   UPLOAD_DIR,
   IMAGE_MIME,
+  AUDIO_MIME,
   isImageMime,
+  isAudioMime,
   toDTO,
   create,
   findById,

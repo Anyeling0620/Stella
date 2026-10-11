@@ -6,16 +6,32 @@
  */
 const env = import.meta.env;
 
-const API_BASE = ((env.VITE_API_BASE as string | undefined) ?? 'http://127.0.0.1:3001').replace(/\/+$/, '');
+/**
+ * API origin. Empty by default ⇒ same-origin: in dev the Vite server proxies
+ * `/api` and `/ws` to the backend (see `vite.config.ts`), and in production the
+ * SPA and API are served from one origin. Set `VITE_API_BASE` only when the
+ * backend genuinely lives on a different origin.
+ *
+ * Same-origin matters for security: it lets the HttpOnly refresh cookie be a
+ * first-party `SameSite=Lax` cookie (cross-site dev hosts like
+ * `localhost:5173` → `127.0.0.1:3001` would drop it).
+ */
+const API_BASE = ((env.VITE_API_BASE as string | undefined) ?? '').replace(/\/+$/, '');
+
+/** Absolute ws(s):// base when the API is same-origin. */
+const wsDefault = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 
 export const API = {
   base: API_BASE,
-  ws: (env.VITE_WS_URL as string | undefined) ?? `${API_BASE.replace(/^http/, 'ws')}/ws`,
+  ws: (env.VITE_WS_URL as string | undefined) ?? (API_BASE ? `${API_BASE.replace(/^http/, 'ws')}/ws` : wsDefault),
   poll: `${API_BASE}/api/messages/poll`,
 } as const;
 
 /** Endpoints that must never trigger the silent 401-refresh flow. */
-export const AUTH_FREE_PATHS = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh'];
+export const AUTH_FREE_PATHS = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/restore'];
+
+/** Non-HttpOnly double-submit CSRF cookie set alongside the refresh cookie. */
+export const CSRF_COOKIE = 'stella_csrf';
 
 export const STORAGE_KEYS = {
   /** The persisted session (access + refresh token). */

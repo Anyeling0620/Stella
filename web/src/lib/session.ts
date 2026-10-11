@@ -5,80 +5,90 @@ import type { SessionPayload, StoredSession, User } from '../types';
 /**
  * Global session manager.
  *
- * Owns the single source of truth for the persisted session and implements
- * "one logout logs out every tab" via a StorageEvent signal.
+ * Security model (chapter 15 of the checklist):
+ *   - The **refresh token** lives in an HttpOnly cookie owned by the server and
+ *     is never visible to JavaScript.
+ *   - The **access token** lives in a module-level variable (memory only) — it
+ *     is never written to localStorage, so an XSS cannot exfiltrate it.
+ *   - localStorage keeps only a **user hint** (`{ user }`) so a reload knows to
+ *     attempt a silent refresh instead of flashing the login page.
+ *
+ * Cross-tab "one logout logs out every tab" still works via a StorageEvent.
  */
-let cache: StoredSession | null | undefined;
+let hint: StoredSession | null | undefined;
+let accessToken: string | null = null;
+let accessExpiresAt = 0;
 
-function load(): StoredSession | null {
-  if (cache !== undefined) return cache;
+function loadHint(): StoredSession | null {
+  if (hint !== undefined) return hint;
   const stored = readJSON<StoredSession | null>(STORAGE_KEYS.session, null);
-  if (!stored || typeof stored.accessToken !== 'string' || !stored.user) {
-    cache = null;
-    return cache;
-  }
-  cache = stored;
-  return cache;
+  hint = stored && stored.user ? stored : null;
+  return hint;
 }
 
 export const session = {
-  get(): StoredSession | null {
-    return load();
-  },
-
   getUser(): User | null {
-    return load()?.user ?? null;
+    return loadHint()?.user ?? null;
   },
 
+  /** True when a persisted login hint exists (used to trigger a boot refresh). */
+  hasUserHint(): boolean {
+    return !!loadHint()?.user;
+  },
+
+  /**
+   * Routing convenience: a hint OR a live access token.
+   * Real authority always comes from the server (a 401 triggers a refresh or a
+   * logout) — this only decides whether to render the shell or the login form.
+   */
   isAuthenticated(): boolean {
-    const current = load();
-    return !!current?.accessToken && !!current?.refreshToken;
+    return !!accessToken || !!loadHint()?.user;
   },
 
-  /** Persists a brand new login/registration payload. */
+  getAccessToken(): string | null {
+    return accessToken;
+  },
+
+  /** Persists a brand new login/registration payload (access token stays in memory). */
   set(payload: SessionPayload): StoredSession {
-    const next: StoredSession = {
-      user: payload.user,
-      accessToken: payload.accessToken,
-      refreshToken: payload.refreshToken,
-      accessExpiresAt: Date.now() + payload.expiresIn * 1000,
-    };
-    cache = next;
+    accessToken = payload.accessToken;
+    accessExpiresAt = Date.now() + payload.expiresIn * 1000;
+    const next: StoredSession = { user: payload.user };
+    hint = next;
     writeJSON(STORAGE_KEYS.session, next);
     return next;
   },
 
+  /** Applies a silently-refreshed access token without touching the user hint. */
+  setAccessToken(token: string, expiresIn: number): void {
+    accessToken = token;
+    accessExpiresAt = Date.now() + expiresIn * 1000;
+  },
+
   clear(): void {
-    cache = null;
+    hint = null;
+    accessToken = null;
+    accessExpiresAt = 0;
     removeKey(STORAGE_KEYS.session);
   },
 
   /**
-   * Merges a partial profile into the persisted user (nickname / avatar edits).
-   * Kept separate from `set()` because that one requires a fresh token pair.
+   * Merges a partial profile into the persisted user hint (nickname / avatar /
+   * bio edits). Kept separate from `set()` because that one requires a token.
    */
   updateUser(patch: Partial<User>): User | null {
-    const current = load();
+    const current = loadHint();
     if (!current) return null;
     const next: StoredSession = { ...current, user: { ...current.user, ...patch } };
-    cache = next;
+    hint = next;
     writeJSON(STORAGE_KEYS.session, next);
     return next.user;
   },
 
-  getAccessToken(): string | null {
-    return load()?.accessToken ?? null;
-  },
-
-  getRefreshToken(): string | null {
-    return load()?.refreshToken ?? null;
-  },
-
-  /** True when the access token is expired or about to expire. */
+  /** True when the access token is missing, expired, or about to expire. */
   isAccessExpiring(skewMs = 15_000): boolean {
-    const current = load();
-    if (!current) return true;
-    return Date.now() >= current.accessExpiresAt - skewMs;
+    if (!accessToken) return true;
+    return Date.now() >= accessExpiresAt - skewMs;
   },
 };
 

@@ -4,11 +4,15 @@ const express = require('express');
 const groupService = require('../services/groupService');
 const messageService = require('../services/messageService');
 const { requireAuth } = require('../middleware/auth');
+const { rateLimit } = require('../middleware/rateLimit');
 const { asyncHandler } = require('../utils/errors');
 
 const router = express.Router();
 
 router.use(requireAuth);
+
+/** Anti-abuse throttle: 10 group creations per hour per user. */
+const createLimit = rateLimit({ name: 'group-create', windowMs: 60 * 60 * 1000, max: 10, keyBy: (req) => req.userId });
 
 /** GET /api/groups — my groups with unread counts and last message. */
 router.get(
@@ -22,6 +26,7 @@ router.get(
 /** POST /api/groups { name, memberIds: [] } — create and pull friends in. */
 router.post(
   '/',
+  createLimit,
   asyncHandler(async (req, res) => {
     const body = req.body || {};
     const group = await groupService.createGroup({
@@ -101,6 +106,42 @@ router.delete(
       memberId: req.params.userId,
     });
     res.json({ ok: true, data: result });
+  })
+);
+
+/** PATCH /api/groups/:id/members/me { nickname } — set my 群昵称. */
+router.patch(
+  '/:id/members/me',
+  asyncHandler(async (req, res) => {
+    const result = await groupService.setGroupNickname({
+      userId: req.userId,
+      groupId: req.params.id,
+      nickname: req.body && req.body.nickname,
+    });
+    res.json({ ok: true, data: result });
+  })
+);
+
+/** PATCH /api/groups/:id/members/:userId/role { role } — owner appoints admin. */
+router.patch(
+  '/:id/members/:userId/role',
+  asyncHandler(async (req, res) => {
+    const result = await groupService.setMemberRole({
+      userId: req.userId,
+      groupId: req.params.id,
+      memberId: req.params.userId,
+      role: req.body && req.body.role,
+    });
+    res.json({ ok: true, data: result });
+  })
+);
+
+/** GET /api/groups/:id/files — files shared in the group. */
+router.get(
+  '/:id/files',
+  asyncHandler(async (req, res) => {
+    const files = await groupService.listFiles({ userId: req.userId, groupId: req.params.id });
+    res.json({ ok: true, data: { files } });
   })
 );
 

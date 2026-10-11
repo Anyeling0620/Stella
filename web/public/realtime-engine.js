@@ -35,7 +35,7 @@
     baseDelayMs: 1000,
     maxDelayMs: 30000,
     jitter: 0.5,
-    maxReconnectAttempts: 8,
+    maxReconnectAttempts: 4,
     // heartbeat
     heartbeatIntervalMs: 25000,
     heartbeatTimeoutMs: 12000,

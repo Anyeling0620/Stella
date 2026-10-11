@@ -3,6 +3,7 @@ import { groupApi } from '../lib/api';
 import { ApiError } from '../lib/axiosClient';
 import { useAppActions } from '../context/AppContext';
 import { Avatar } from './Avatar';
+import { Icon } from './Icon';
 import type { Group, User } from '../types';
 
 interface CreateGroupDialogProps {
@@ -114,7 +115,9 @@ export function CreateGroupDialog({ open, friends, frozen, onClose, onCreated }:
                 >
                   <Avatar name={friend.nickname} avatar={friend.avatar} size={34} tone="muted" />
                   <span className="member-option-name">{friend.nickname}</span>
-                  <span className="member-option-check">{selected.has(friend.id) ? '✓' : ''}</span>
+                  <span className="member-option-check">
+                    {selected.has(friend.id) && <Icon name="check" size={18} />}
+                  </span>
                 </button>
               ))}
             </div>

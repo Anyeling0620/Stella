@@ -76,6 +76,12 @@ export interface AppActions {
 export interface AppSession {
   user: User | null;
   isAuthenticated: boolean;
+  /**
+   * False until the boot-time silent refresh has resolved. Routing must wait on
+   * this, otherwise a reload would flash the login page while the (memory-only)
+   * access token is still being re-minted from the HttpOnly cookie.
+   */
+  authReady: boolean;
   activeConversationId: string | null;
 }
 
@@ -145,6 +151,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [transport, setTransport] = useState<TransportKind>('shared-worker');
   const [isLeader, setIsLeader] = useState(true);
   const [activeConversationId, setActiveConversationIdState] = useState<string | null>(null);
+  /** Routing gate: resolved once the boot refresh finishes (see bootstrap effect). */
+  const [authReady, setAuthReady] = useState(false);
   const [transportMode, setTransportModeState] = useState<TransportMode>(() => readStoredTransportMode());
   const [transportHost, setTransportHostState] = useState<TransportHost>(() => readStoredTransportHost());
   /** Latest ping round-trip time (ms); null until the first sample. */
@@ -240,12 +248,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveConversationIdState(null);
     setIsLeader(true);
     setLatencyMs(null);
+    setAuthReady(true);
     realtimeRef.current?.disconnect();
   }, []);
 
   const signIn = useCallback((payload: SessionPayload) => {
     session.set(payload);
     setUser(payload.user);
+    setAuthReady(true);
     realtimeRef.current?.connect(payload.accessToken);
   }, []);
 
@@ -362,6 +372,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [dispatchFrame, dispatchNotice, pushToast, teardownLocalSession, transportHost]);
 
   // -------------------------------------------------------------------------
+  // Boot: re-mint a memory-only access token from the HttpOnly refresh cookie.
+  // The refresh token is never readable by JS, so a reload must ask the server
+  // for a fresh access token before the shell can talk to the API.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (session.getAccessToken() || !session.hasUserHint()) {
+        if (!cancelled) setAuthReady(true);
+        return;
+      }
+      try {
+        const token = await refreshAccessToken();
+        if (cancelled) return;
+        setUser(session.getUser());
+        realtimeRef.current?.connect(token);
+      } catch {
+        // refreshAccessToken already cleared the session and fired onExpired.
+        if (!cancelled) setUser(null);
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // -------------------------------------------------------------------------
   // Cross-tab logout + axios auth hooks
   // -------------------------------------------------------------------------
   useEffect(() => {
@@ -458,8 +497,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   );
 
   const sessionValue = useMemo<AppSession>(
-    () => ({ user, isAuthenticated: !!user, activeConversationId }),
-    [user, activeConversationId]
+    () => ({ user, isAuthenticated: !!user, authReady, activeConversationId }),
+    [user, authReady, activeConversationId]
   );
 
   const isFrozen = !!user && !isLeader;
